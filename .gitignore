@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+.venv/
+
+# Build artifacts
+*.egg-info/
+build/
+dist/
+
+# uv lockfile is committed on purpose (reproducible installs); keep it.
+
+# CLI output
+output/
+
+# Secrets — real session dumps with auth cookies. Never commit or share these.
+.janitor-session.json
+*.session.json
+
+# Persistent Botasaurus browser profile (holds the logged-in cookies).
+.rip-botasaurus-profile/
+
+# Saucepan bearer token (secret; never commit or share).
+.saucepan-token
+
+# Local, machine-specific Claude Code settings.
+.claude/settings.local.json

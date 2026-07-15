@@ -1,0 +1,29 @@
+[project]
+name = "ripart"
+version = "0.1.0"
+description = "RIPart — a browser-driven CLI to rip characters & lorebooks from JanitorAI."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "botasaurus>=4.0.97",
+    "botasaurus-driver>=4.0.92",
+    "rich-click>=1.9.8",
+    "pillow>=10.0.0",
+]
+
+[project.scripts]
+rip = "ripart.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+# Flat layout: the module files live directly in this directory, so map the
+# `ripart` import package onto ".". This keeps the files where they are while
+# still exposing a proper `ripart` package (needed by the relative imports and
+# the `rip` entry point above).
+[tool.setuptools]
+packages = ["ripart"]
+
+[tool.setuptools.package-dir]
+ripart = "."
