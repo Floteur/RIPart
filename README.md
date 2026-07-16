@@ -3,7 +3,7 @@
 A small, browser-driven command-line tool for ripping character cards and
 lorebooks from [JanitorAI](https://janitorai.com). It drives a real (headless)
 Chrome via [Botasaurus](https://github.com/omkarcloud/botasaurus), so it sees
-exactly what your browser sees — including private card definitions surfaced
+exactly what your browser sees - including private card definitions surfaced
 through the `generateAlpha` endpoint.
 
 ## Requirements
@@ -30,7 +30,7 @@ python -m ripart --help    # as a module
 ## Quickstart
 
 ```bash
-rip login            # 1. log in once — the session is saved and reused
+rip login            # 1. log in once - the session is saved and reused
 rip status           # 2. confirm you're logged in
 rip inspect <url>    # 3. peek at a character's public metadata
 rip extract <url>    # 4. rip the full card + lorebook
@@ -48,7 +48,7 @@ Run `rip COMMAND --help` for the full, colour-coded help of any command.
 | --- | --- |
 | `rip status` | Check whether the browser profile is logged in. Exit code `0` = yes, `1` = no. |
 | `rip login` | Open JanitorAI and wait for you to sign in. `--timeout SECONDS` (default 180). |
-| `rip import-session PATH` | Import a cookie/localStorage JSON dump into the profile — handy on headless servers where you can't log in interactively. |
+| `rip import-session PATH` | Import a cookie/localStorage JSON dump into the profile - handy on headless servers where you can't log in interactively. |
 | `rip inspect URL` | Fetch a character's public metadata and public lorebooks (read-only). Writes `output/cli/inspections/<name>.json`. |
 | `rip extract URL` | Rip the private card + lorebook via `generateAlpha`. Writes the capture, raw lorebook, character card, and avatar under `output/cli/extracts/<name>/`. A `saucepan.ai` URL is routed to the Saucepan path below. |
 | `rip saucepan …` | Rip companions from [Saucepan](https://saucepan.ai) via its REST API (no browser). See below. |
@@ -57,7 +57,7 @@ Run `rip COMMAND --help` for the full, colour-coded help of any command.
 ## Saucepan (saucepan.ai)
 
 Saucepan serves companion definitions through an authenticated REST API, so
-ripping needs **no browser** — it is a direct, exact pull rather than a
+ripping needs **no browser** - it is a direct, exact pull rather than a
 reconstruction. Log in once (the bearer token is saved to a gitignored
 `.saucepan-token` and reused), then extract:
 
@@ -108,7 +108,7 @@ Notes and caveats:
 - **A compliant model is required.** Saucepan's own default model refuses to
   reveal its instructions, so the leak runs through a model you choose: either a
   **BYOK provider config** (`--leak-config`, set up on saucepan.ai under Model
-  Providers — see `rip saucepan providers`) or a Saucepan `--leak-model` alias.
+  Providers - see `rip saucepan providers`) or a Saucepan `--leak-model` alias.
 - **It creates a chat and spends a generation** on every attempt (through your
   chosen model/provider). The throwaway chat is archived automatically.
 - **It is lossy and non-deterministic.** The model may refuse or paraphrase;

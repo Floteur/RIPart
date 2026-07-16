@@ -16,7 +16,7 @@ from typing import Any
 
 ORIGIN = "https://janitorai.com"
 
-# Longest-side cap (px) for stored card portraits — keeps library PNGs small.
+# Longest-side cap (px) for stored card portraits - keeps library PNGs small.
 CARD_MAX_DIM = 512
 
 
@@ -108,7 +108,7 @@ def parse_leaked_definition(text: str) -> dict[str, str]:
     assembled prompt: optionally fenced in a ``` code block, optionally wrapped
     in ``<Name's Persona>…</…Persona>``, with ``<Scenario>`` and
     ``<example_dialogs>`` sub-blocks. This strips the fence/tags and returns
-    ``{description, scenario, exampleMessages}`` — lossy by nature (see
+    ``{description, scenario, exampleMessages}`` - lossy by nature (see
     ``definitionSource: reconstructed-jllm``).
     """
     raw = (text or "").strip()
@@ -144,7 +144,7 @@ def _loose_pattern(value: str) -> str:
     escaped = re.sub(r"\\\s+", r"\\s+", escaped)
     escaped = re.sub(r"['‘’ʼ]", r"['\u2018\u2019\u02BC]", escaped)
     escaped = re.sub(r'["“”]', r'["\u201C\u201D]', escaped)
-    escaped = re.sub(r"[\-–—]", r"[-\u2013\u2014]", escaped)
+    escaped = re.sub(r"[\-–-]", r"[-\u2013\u2014]", escaped)
     return escaped
 
 
@@ -497,7 +497,7 @@ def build_character_book(
             "probability": 100,
         })
 
-    # 1) Public lorebook entries — preserve their real trigger keys.
+    # 1) Public lorebook entries - preserve their real trigger keys.
     for entry in _public_book_entries(public_lorebooks):
         _add(
             entry.get("content"),
@@ -507,7 +507,7 @@ def build_character_book(
             constant=entry.get("constant") is True,
             enabled=entry.get("disable") is not True,
         )
-    # 2) Extracted closed-lorebook blocks — keyless, always active.
+    # 2) Extracted closed-lorebook blocks - keyless, always active.
     for content in entries or []:
         _add(content, keys=[], secondary=[], comment="", constant=True, enabled=True)
 

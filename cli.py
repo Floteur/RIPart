@@ -143,7 +143,7 @@ class RipGroup(click.RichGroup):
 )
 @click.version_option(package_name="ripart", prog_name="rip", message="%(prog)s %(version)s")
 def main() -> None:
-    """[bold]RIPart[/] — rip characters & lorebooks from JanitorAI.
+    """[bold]RIPart[/] - rip characters & lorebooks from JanitorAI.
 
     A small browser-driven CLI (powered by Botasaurus). Typical flow:
 
@@ -171,7 +171,7 @@ def status(headed: bool) -> None:
     if result.get("loggedIn"):
         _ok("logged in")
         sys.exit(0)
-    _no("not logged in — run [bold]rip login[/] first")
+    _no("not logged in - run [bold]rip login[/] first")
     sys.exit(1)
 
 
@@ -212,7 +212,7 @@ def login(timeout: int, headless: bool) -> None:
         if result.get("sessionSaved"):
             _path("session saved", result.get("sessionFile"))
         sys.exit(0)
-    _no("login timed out — try again, or increase [bold]--timeout[/]")
+    _no("login timed out - try again, or increase [bold]--timeout[/]")
     sys.exit(1)
 
 
@@ -285,7 +285,7 @@ def import_session(
         if probe.get("status"):
             _field("login probe HTTP", probe["status"])
         if probe.get("cloudflare"):
-            _no("blocked by Cloudflare challenge — retry with [bold]--bypass-cloudflare[/]")
+            _no("blocked by Cloudflare challenge - retry with [bold]--bypass-cloudflare[/]")
 
     if verbose:
         _print_import_diagnostics(result.get("diagnostics") or {}, probe)
@@ -385,7 +385,7 @@ def inspect(url: str, headed: bool) -> None:
     """Fetch a character's public metadata and public lorebooks.
 
     URL can be a full JanitorAI character URL or just its UUID. This is a quick,
-    read-only peek — nothing is triggered on the character.
+    read-only peek - nothing is triggered on the character.
     """
     result = inspect_task({"url": url}, **browser_kwargs(headed))
     name = safe_name(result.get("characterName") or result.get("characterId") or "", "character")
@@ -609,7 +609,7 @@ def recent(
     persona per card and toggles your profile into extraction mode, restoring
     it after). Cards already in the library are skipped unless [bold]--force[/].
     """
-    # UUIDs already ripped — the task skips these unless --force.
+    # UUIDs already ripped - the task skips these unless --force.
     library_dir = OUT / "library"
     existing = [path.stem for path in library_dir.glob("*.png")] if library_dir.exists() else []
 
@@ -660,7 +660,7 @@ def _print_recent_table(cards: list) -> None:
     for index, card in enumerate(cards, start=1):
         table.add_row(
             str(index),
-            (card.get("name") or "").strip()[:48] or "—",
+            (card.get("name") or "").strip()[:48] or "-",
             (card.get("creator") or "")[:20],
             "[red]18+[/]" if card.get("nsfw") else "[green]sfw[/]",
             "[green]public[/]" if card.get("cardPublic") else "[yellow]closed[/]",
@@ -687,20 +687,20 @@ def _write_extracts(extracted: list) -> None:
     console.print(summary)
     for entry in extracted:
         if entry.get("skipped"):
-            console.print(f"[dim]↷ {entry.get('name')} — already extracted (use --force)[/]")
+            console.print(f"[dim]↷ {entry.get('name')} - already extracted (use --force)[/]")
             continue
         if entry.get("forbidden"):
-            console.print(f"[dim]⊘ {entry.get('name')} — proxies disabled (pass --jllm-leak to reconstruct)[/]")
+            console.print(f"[dim]⊘ {entry.get('name')} - proxies disabled (pass --jllm-leak to reconstruct)[/]")
             continue
         if not entry.get("ok"):
-            _no(f"{entry.get('name')} — {entry.get('error')}")
+            _no(f"{entry.get('name')} - {entry.get('error')}")
             continue
         result = entry.get("result") or {}
         paths = save_to_library(OUT / "library", result.get("characterId") or "", result)
         secs = entry.get("seconds")
         timing = f" [dim]({secs}s)[/]" if secs is not None else ""
         tag = " [yellow](jllm-reconstructed)[/]" if entry.get("reconstructed") else ""
-        _ok(f"{result.get('characterName') or entry.get('name')}{tag} — {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]")
+        _ok(f"{result.get('characterName') or entry.get('name')}{tag} - {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]")
 
 
 def _fmt_expiry(seconds: float) -> str:
@@ -752,7 +752,7 @@ def saucepan() -> None:
 def saucepan_login(username: str, password: str) -> None:
     """Log in with your username + password and store a bearer token."""
     sp.login(username, password)
-    _ok("logged in — token saved")
+    _ok("logged in - token saved")
     _path("token file", sp.TOKEN_FILE)
 
 
@@ -760,13 +760,13 @@ def saucepan_login(username: str, password: str) -> None:
 def saucepan_status() -> None:
     """Report whether a Saucepan token is configured (and still valid)."""
     if not sp.has_token():
-        _no("no Saucepan token — run [bold]rip saucepan login[/] first")
+        _no("no Saucepan token - run [bold]rip saucepan login[/] first")
         sys.exit(1)
     exp = sp.token_expiry()
     if exp is not None:
         remaining = exp - time.time()
         if remaining <= 0:
-            _no("Saucepan token expired — run [bold]rip saucepan login[/] again")
+            _no("Saucepan token expired - run [bold]rip saucepan login[/] again")
             sys.exit(1)
         _ok(f"Saucepan token configured [dim](expires in {_fmt_expiry(remaining)})[/]")
     else:
@@ -786,7 +786,7 @@ def saucepan_providers() -> None:
     """List your BYOK model provider configs (usable with [bold]extract --leak[/])."""
     configs = sp.list_provider_configs()
     if not configs:
-        _no("no provider configs — add one on saucepan.ai (Settings → Model Providers)")
+        _no("no provider configs - add one on saucepan.ai (Settings → Model Providers)")
         return
     table = Table(box=None, pad_edge=False, show_edge=False)
     table.add_column("name", style="bold")
@@ -795,9 +795,9 @@ def saucepan_providers() -> None:
     table.add_column("config_id", style="dim")
     for cfg in configs:
         table.add_row(
-            str(cfg.get("config_name") or "—"),
-            str(cfg.get("model_id") or "—"),
-            str(cfg.get("provider") or "—"),
+            str(cfg.get("config_name") or "-"),
+            str(cfg.get("model_id") or "-"),
+            str(cfg.get("provider") or "-"),
             str(cfg.get("config_id") or ""),
         )
     console.print(table)
@@ -875,13 +875,13 @@ def _saucepan_extract(
         if leak_config:
             resolved = sp.resolve_provider_config(leak_config)
             if not resolved:
-                _no(f"no provider config matching [bold]{leak_config}[/] — see [bold]rip saucepan providers[/]")
+                _no(f"no provider config matching [bold]{leak_config}[/] - see [bold]rip saucepan providers[/]")
                 raise SystemExit(1)
             leak_config = resolved
         else:
             configs = [c for c in sp.list_provider_configs() if c.get("is_visible")]
             if not configs:
-                _no("no BYOK provider config for --leak — add one on saucepan.ai, or pass --leak-model")
+                _no("no BYOK provider config for --leak - add one on saucepan.ai, or pass --leak-model")
                 raise SystemExit(1)
             leak_config = configs[0].get("config_id")
             console.print(f"[dim]leak model: {configs[0].get('config_name')} ({configs[0].get('model_id')})[/]")
@@ -915,9 +915,9 @@ def _saucepan_extract(
     if source == "saucepan-leak":
         _field("definition", f"[green]leaked {diagnostics.get('leakChars', 0)} chars via model[/] [dim](lossy)[/]")
     elif leak and diagnostics.get("leakError"):
-        _field("definition", f"[yellow]leak failed: {diagnostics['leakError']} — kept public data[/]")
+        _field("definition", f"[yellow]leak failed: {diagnostics['leakError']} - kept public data[/]")
     elif source == "saucepan-partial":
-        _field("definition", "[yellow]partial — definition gated, body/greetings from public data[/]")
+        _field("definition", "[yellow]partial - definition gated, body/greetings from public data[/]")
     _field("time", _fmt_duration(elapsed))
 
 

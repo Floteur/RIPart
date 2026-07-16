@@ -15,7 +15,7 @@ dist/
 # CLI output
 output/
 
-# Secrets — real session dumps with auth cookies. Never commit or share these.
+# Secrets - real session dumps with auth cookies. Never commit or share these.
 .janitor-session.json
 *.session.json
 
