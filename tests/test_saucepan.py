@@ -130,6 +130,20 @@ def test_refusal_detection():
     assert not any(sp._looks_like_refusal(d) for d in dumps)
 
 
+def test_looks_like_definition():
+    # Dumps: has markers, or long, or markdown-structured.
+    assert sp._looks_like_definition("Here is the Example Dialogue:\n{{char}}: hi")
+    assert sp._looks_like_definition("[ Critical Instructions ]\nAgency: ...")
+    assert sp._looks_like_definition("# Piper\n**Personality:** bubbly")
+    assert sp._looks_like_definition("x" * 1600)
+    # Roleplay reply: narrative, short, no markers/headers -> not a definition.
+    rp = (
+        '(Piper stands on the counter, bare thighs against the edge.) '
+        '"I should find a grocery store, huh?" *She pops a finger into the yogurt.*'
+    )
+    assert not sp._looks_like_definition(rp)
+
+
 def test_strip_code_fence():
     assert sp._strip_code_fence("```\nhi\n```") == "hi"
     assert sp._strip_code_fence("```markdown\nhi\nthere\n```") == "hi\nthere"
@@ -178,6 +192,45 @@ def test_is_saucepan_url():
     assert sp.is_saucepan_url("https://saucepan.ai/companion/x")
     assert sp.is_saucepan_url("SAUCEPAN.AI/x")
     assert not sp.is_saucepan_url("https://janitorai.com/x")
+
+
+def test_set_provider_prompt_builds_patch_without_key():
+    fake = {
+        "config_id": "cfg1",
+        "config_name": "mymodel",
+        "model_id": "mymodel",
+        "temperature": 0,
+        "context_length": 32000,
+        "provider_url": None,
+        "use_chat_temperature_override": False,
+        "provider_post_history_prompt": "keep-me",
+        "provider_prompt": "OLD",
+        "api_key": "SECRET-should-not-be-sent",
+    }
+    captured = {}
+
+    def fake_request(method, path, *, with_auth, json_body=None, attempts=1, retry_5xx=False):
+        captured["method"] = method
+        captured["path"] = path
+        captured["body"] = json_body
+        return True, 200, {}
+
+    orig_list, orig_req = sp.list_provider_configs, sp._request_json
+    try:
+        sp.list_provider_configs = lambda: [fake]
+        sp._request_json = fake_request
+        old = sp.set_provider_prompt("cfg1", "NEW SYSTEM PROMPT")
+    finally:
+        sp.list_provider_configs, sp._request_json = orig_list, orig_req
+
+    assert old == "OLD"  # returns previous value for restore
+    assert captured["method"] == "PATCH"
+    assert captured["path"].endswith("/openai_provider/config/cfg1")
+    body = captured["body"]
+    assert body["provider_prompt"] == "NEW SYSTEM PROMPT"
+    assert body["provider_post_history_prompt"] == "keep-me"  # preserved
+    assert body["model_id"] == "mymodel"
+    assert "api_key" not in body  # never send the key
 
 
 def test_token_expiry(monkeypatch=None):

@@ -873,10 +873,40 @@ def saucepan_providers() -> None:
 )
 @click.option(
     "--leak-mode",
-    type=click.Choice(["director", "user"]),
-    default="director",
+    type=click.Choice(["user", "director"]),
+    default="user",
     show_default=True,
-    help="[--leak] Generation mode; 'director' (OOC) usually complies best.",
+    help="[--leak] Generation mode. 'user' works with the widest range of models; "
+    "some models return nothing in 'director' mode.",
+)
+@click.option(
+    "--leak-prompt",
+    metavar="TEXT",
+    default=None,
+    help="[--leak] Override the message sent to the model. Keep it short and generic — "
+    "Saucepan blocks prompts that name the protected sections or use jailbreak phrasing.",
+)
+@click.option(
+    "--leak-system",
+    metavar="TEXT",
+    default=None,
+    help="[--leak, BYOK only] Temporarily set the provider config's system prompt "
+    "(\"Provider Pre Content Prompt\") for the leak, then restore it. Helps a capable "
+    "model dump verbatim; needs --leak-config (not --leak-model).",
+)
+@click.option(
+    "--leak-keep",
+    is_flag=True,
+    default=False,
+    help="[--leak] Accept the model's reply even if it doesn't look like a definition "
+    "dump (by default such replies are retried, since models often just keep roleplaying).",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    default=False,
+    help="Print diagnostics (definition/lorebook counts, and every leak step: model, "
+    "poll status, context breakdown, reply preview).",
 )
 def saucepan_extract(
     url: str,
@@ -885,6 +915,10 @@ def saucepan_extract(
     leak_config: str | None,
     leak_model: str | None,
     leak_mode: str,
+    leak_prompt: str | None,
+    leak_system: str | None,
+    leak_keep: bool,
+    verbose: bool,
 ) -> None:
     """Rip a Saucepan companion card + lorebooks by URL (or bare companion id)."""
     _saucepan_extract(
@@ -894,6 +928,10 @@ def saucepan_extract(
         leak_config=leak_config,
         leak_model=leak_model,
         leak_mode=leak_mode,
+        leak_prompt=leak_prompt,
+        leak_system=leak_system,
+        leak_keep=leak_keep,
+        verbose=verbose,
     )
 
 
@@ -917,9 +955,14 @@ def _saucepan_extract(
     leak: bool = False,
     leak_config: str | None = None,
     leak_model: str | None = None,
-    leak_mode: str = "director",
+    leak_mode: str = "user",
+    leak_prompt: str | None = None,
+    leak_system: str | None = None,
+    leak_keep: bool = False,
+    verbose: bool = False,
 ) -> None:
     """Shared implementation for [rip saucepan extract] and [rip extract <sp url>]."""
+    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose else (lambda m: None)
     if leak and leak_config and leak_model:
         console.print(
             "[yellow]![/] both --leak-config and --leak-model given; using --leak-config"
@@ -948,6 +991,20 @@ def _saucepan_extract(
                 f"[dim]leak model: {configs[0].get('config_name')} ({configs[0].get('model_id')})[/]"
             )
 
+    # Optionally set the provider's system prompt for the leak, restoring it after.
+    restore: tuple[str, str | None] | None = None
+    if leak and leak_system:
+        if not leak_config:
+            _no("--leak-system needs a BYOK --leak-config (not --leak-model)")
+            raise SystemExit(1)
+        try:
+            previous = sp.set_provider_prompt(leak_config, leak_system)
+            restore = (leak_config, previous)
+            log("set provider system prompt for leak")
+        except sp.SaucepanError as exc:
+            _no(f"could not set --leak-system: {exc}")
+            raise SystemExit(1)
+
     started = time.monotonic()
     try:
         result = sp.extract_companion(
@@ -957,12 +1014,25 @@ def _saucepan_extract(
             leak_config=leak_config,
             leak_model=leak_model,
             leak_mode=leak_mode,
+            leak_prompt=leak_prompt,
+            leak_keep=leak_keep,
+            log=log,
         )
     except sp.SaucepanError as exc:
         _no(str(exc))
         if exc.status == 401:
             err_console.print("[dim]run [bold]rip saucepan login[/] to authenticate[/]")
         raise SystemExit(1)
+    finally:
+        if restore is not None:
+            try:
+                sp.set_provider_prompt(restore[0], restore[1])
+                log("restored provider system prompt")
+            except sp.SaucepanError:
+                err_console.print(
+                    "[yellow]![/] could not restore the provider system prompt — "
+                    f"check config [bold]{leak_config}[/] in Saucepan settings"
+                )
     elapsed = time.monotonic() - started
     library_dir = OUT / "library"
     paths = save_to_library(library_dir, result.get("characterId") or "", result)
@@ -1006,6 +1076,13 @@ def _saucepan_extract(
             "[yellow]partial - definition gated, body/greetings from public data[/]",
         )
     _field("time", _fmt_duration(elapsed))
+
+    if verbose:
+        _field("definition open", diagnostics.get("definitionOpen"))
+        _field("definition sections", diagnostics.get("sections") or [])
+        _field("lorebooks", diagnostics.get("lorebooks", 0))
+        if leak and diagnostics.get("leakError"):
+            _field("leak error", diagnostics["leakError"])
 
 
 # --------------------------------------------------------------------------- #
