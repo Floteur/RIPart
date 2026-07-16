@@ -54,14 +54,20 @@ def write_json(path: Path, data: Any) -> Path:
 
 def get_system_content(payload: dict[str, Any]) -> str:
     for message in (payload or {}).get("messages") or []:
-        if message and message.get("role") == "system" and isinstance(message.get("content"), str):
+        if (
+            message
+            and message.get("role") == "system"
+            and isinstance(message.get("content"), str)
+        ):
             return message["content"]
     return ""
 
 
 def strip_wrappers(text: str) -> str:
     out = re.sub(r"^\s*(?:\[[^\]]*\]\s*)+", "", text or "")
-    out = re.sub(r"<[^<>\n]*?Persona>[\s\S]*?</[^<>\n]*?Persona>", "\n", out, flags=re.I)
+    out = re.sub(
+        r"<[^<>\n]*?Persona>[\s\S]*?</[^<>\n]*?Persona>", "\n", out, flags=re.I
+    )
     out = re.sub(r"<Scenario>[\s\S]*?</Scenario>", "\n", out, flags=re.I)
     out = re.sub(r"<Example[^<>\n]*>[\s\S]*?</Example[^<>\n]*>", "\n", out, flags=re.I)
     return out
@@ -69,7 +75,9 @@ def strip_wrappers(text: str) -> str:
 
 def extract_card(payload: dict[str, Any]) -> str:
     system = get_system_content(payload)
-    for match in re.finditer(r"<([^<>\n]*?)Persona>([\s\S]*?)</[^<>\n]*?Persona>", system, re.I):
+    for match in re.finditer(
+        r"<([^<>\n]*?)Persona>([\s\S]*?)</[^<>\n]*?Persona>", system, re.I
+    ):
         if re.match(r"\s*user", match.group(1), re.I):
             continue
         return match.group(2).strip()
@@ -85,18 +93,28 @@ def extract_char_name(payload: dict[str, Any]) -> str:
 
 
 def extract_scenario(payload: dict[str, Any]) -> str:
-    match = re.search(r"<Scenario>([\s\S]*?)</Scenario>", get_system_content(payload), re.I)
+    match = re.search(
+        r"<Scenario>([\s\S]*?)</Scenario>", get_system_content(payload), re.I
+    )
     return match.group(1).strip() if match else ""
 
 
 def extract_example(payload: dict[str, Any]) -> str:
-    match = re.search(r"<Example[^<>\n]*?>([\s\S]*?)</Example[^<>\n]*?>", get_system_content(payload), re.I)
+    match = re.search(
+        r"<Example[^<>\n]*?>([\s\S]*?)</Example[^<>\n]*?>",
+        get_system_content(payload),
+        re.I,
+    )
     return match.group(1).strip() if match else ""
 
 
 def extract_first_message(payload: dict[str, Any]) -> str:
     for message in (payload or {}).get("messages") or []:
-        if message and message.get("role") == "assistant" and isinstance(message.get("content"), str):
+        if (
+            message
+            and message.get("role") == "assistant"
+            and isinstance(message.get("content"), str)
+        ):
             return message["content"].strip()
     return ""
 
@@ -127,12 +145,21 @@ def parse_leaked_definition(text: str) -> dict[str, str]:
 
     # Description = everything before the first structural boundary.
     cut = len(raw)
-    for pattern in (r"</[^<>\n]{0,80}?Persona>", r"<Scenario[^<>\n]*?>", r"<example_dialogs[^<>\n]*?>", r"<Example[^<>\n]*?>"):
+    for pattern in (
+        r"</[^<>\n]{0,80}?Persona>",
+        r"<Scenario[^<>\n]*?>",
+        r"<example_dialogs[^<>\n]*?>",
+        r"<Example[^<>\n]*?>",
+    ):
         found = re.search(pattern, raw, re.I)
         if found:
             cut = min(cut, found.start())
     description = raw[:cut].strip()
-    return {"description": description, "scenario": scenario, "exampleMessages": example}
+    return {
+        "description": description,
+        "scenario": scenario,
+        "exampleMessages": example,
+    }
 
 
 def _norm(value: str) -> str:
@@ -176,7 +203,7 @@ def split_text_chunks(text: str, max_len: int = 2500, min_len: int = 40) -> list
                 current = []
                 current_len = 0
             for offset in range(0, len(para), max_len):
-                piece = para[offset:offset + max_len].strip()
+                piece = para[offset : offset + max_len].strip()
                 if len(piece) >= min_len:
                     chunks.append(piece)
             continue
@@ -293,13 +320,20 @@ def merge_separated_results(separations: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
-def separate(payload: dict[str, Any], known_card: str = "", public_contents: list[str] | None = None) -> dict[str, Any]:
+def separate(
+    payload: dict[str, Any],
+    known_card: str = "",
+    public_contents: list[str] | None = None,
+) -> dict[str, Any]:
     system_content = get_system_content(payload)
     text = strip_wrappers(system_content)
     if known_card:
-        known = {_norm(line) for line in known_card.splitlines() if len(_norm(line)) >= 12}
+        known = {
+            _norm(line) for line in known_card.splitlines() if len(_norm(line)) >= 12
+        }
         text = "\n".join(
-            line for line in text.splitlines()
+            line
+            for line in text.splitlines()
             if not (len(_norm(line)) >= 12 and _norm(line) in known)
         )
     for content in public_contents or []:
@@ -321,21 +355,31 @@ def separate(payload: dict[str, Any], known_card: str = "", public_contents: lis
                 if part:
                     wrapped_parts.append(part)
         if wrapped_parts:
-            lorebook_text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(wrapped_parts)).strip()
+            lorebook_text = re.sub(
+                r"\n{3,}", "\n\n", "\n\n".join(wrapped_parts)
+            ).strip()
             for content in public_contents or []:
                 needle = (content or "").strip()
                 if len(needle) >= 12:
-                    lorebook_text = re.sub(_loose_pattern(needle), "\n", lorebook_text, flags=re.I)
+                    lorebook_text = re.sub(
+                        _loose_pattern(needle), "\n", lorebook_text, flags=re.I
+                    )
             lorebook_text = re.sub(r"[ \t]+\n", "\n", lorebook_text)
             lorebook_text = re.sub(r"\n{3,}", "\n\n", lorebook_text).strip()
     return {
         "systemContent": system_content,
         "lorebookText": lorebook_text,
-        "entries": [block.strip() for block in re.split(r"\n\s*\n", lorebook_text) if block.strip()],
+        "entries": [
+            block.strip()
+            for block in re.split(r"\n\s*\n", lorebook_text)
+            if block.strip()
+        ],
     }
 
 
-def collect_greetings(meta: dict[str, Any] | None, captured_first: str = "") -> list[str]:
+def collect_greetings(
+    meta: dict[str, Any] | None, captured_first: str = ""
+) -> list[str]:
     out: list[str] = []
 
     def push(value: Any) -> None:
@@ -355,22 +399,40 @@ def collect_greetings(meta: dict[str, Any] | None, captured_first: str = "") -> 
 
 
 def is_card_public(meta: dict[str, Any] | None) -> bool:
-    return bool(meta and meta.get("showdefinition") and ((meta.get("personality") or "").strip() or (meta.get("scenario") or "").strip()))
+    return bool(
+        meta
+        and meta.get("showdefinition")
+        and (
+            (meta.get("personality") or "").strip()
+            or (meta.get("scenario") or "").strip()
+        )
+    )
 
 
-def build_character(meta: dict[str, Any] | None, payload: dict[str, Any] | None, avatar_base64: str = "", card: str = "") -> dict[str, Any]:
+def build_character(
+    meta: dict[str, Any] | None,
+    payload: dict[str, Any] | None,
+    avatar_base64: str = "",
+    card: str = "",
+) -> dict[str, Any]:
     meta = meta or {}
     greetings = collect_greetings(meta, extract_first_message(payload or {}))
     public = is_card_public(meta)
     return {
         "name": extract_char_name(payload or {}) or meta.get("name") or "",
         "avatarBase64": avatar_base64 or "",
-        "description": (meta.get("personality") or "").strip() if public else (extract_card(payload or {}) or card or ""),
+        "description": (meta.get("personality") or "").strip()
+        if public
+        else (extract_card(payload or {}) or card or ""),
         "personality": "",
-        "scenario": (meta.get("scenario") or "").strip() if public else (extract_scenario(payload or {}) or meta.get("scenario") or ""),
+        "scenario": (meta.get("scenario") or "").strip()
+        if public
+        else (extract_scenario(payload or {}) or meta.get("scenario") or ""),
         "firstMessage": greetings[0] if greetings else "",
         "alternateGreetings": greetings[1:],
-        "exampleMessages": (meta.get("example_dialogs") or "").strip() if public else extract_example(payload or {}),
+        "exampleMessages": (meta.get("example_dialogs") or "").strip()
+        if public
+        else extract_example(payload or {}),
         "creatorNotes": meta.get("description") or "",
         "tags": meta.get("custom_tags") or [],
         "definitionSource": "janitor" if public else "reconstructed",
@@ -385,7 +447,12 @@ def build_world_info(raw_entries: list[dict[str, Any]]) -> dict[str, Any]:
         if not content:
             continue
         key = raw.get("key") or raw.get("keys") or raw.get("keywords") or []
-        secondary = raw.get("keysecondary") or raw.get("secondary_keys") or raw.get("keySecondary") or []
+        secondary = (
+            raw.get("keysecondary")
+            or raw.get("secondary_keys")
+            or raw.get("keySecondary")
+            or []
+        )
         if isinstance(key, str):
             key = [x.strip() for x in key.split(",") if x.strip()]
         if isinstance(secondary, str):
@@ -395,18 +462,27 @@ def build_world_info(raw_entries: list[dict[str, Any]]) -> dict[str, Any]:
             "uid": uid,
             "key": key if isinstance(key, list) else [],
             "keysecondary": secondary if isinstance(secondary, list) else [],
-            "comment": str(raw.get("comment") or raw.get("title") or raw.get("name") or f"Entry {uid}").strip(),
+            "comment": str(
+                raw.get("comment")
+                or raw.get("title")
+                or raw.get("name")
+                or f"Entry {uid}"
+            ).strip(),
             "content": content,
             "constant": raw.get("constant") is True,
             "selective": raw.get("constant") is not True,
             "order": order if isinstance(order, (int, float)) else 100,
-            "position": raw.get("position") if isinstance(raw.get("position"), int) else 0,
+            "position": raw.get("position")
+            if isinstance(raw.get("position"), int)
+            else 0,
             "disable": raw.get("enabled") is False,
             "displayIndex": uid,
             "addMemo": True,
             "group": "",
             "groupOverride": False,
-            "groupWeight": raw.get("groupWeight") if isinstance(raw.get("groupWeight"), int) else 100,
+            "groupWeight": raw.get("groupWeight")
+            if isinstance(raw.get("groupWeight"), int)
+            else 100,
             "sticky": 0,
             "cooldown": 0,
             "delay": 0,
@@ -423,7 +499,9 @@ def build_world_info(raw_entries: list[dict[str, Any]]) -> dict[str, Any]:
             "matchWholeWords": None,
             "useGroupScoring": None,
             "automationId": "",
-            "selectiveLogic": raw.get("selectiveLogic") if isinstance(raw.get("selectiveLogic"), int) else 0,
+            "selectiveLogic": raw.get("selectiveLogic")
+            if isinstance(raw.get("selectiveLogic"), int)
+            else 0,
             "ignoreBudget": False,
             "matchPersonaDescription": False,
             "matchCharacterDescription": False,
@@ -439,11 +517,13 @@ def build_world_info(raw_entries: list[dict[str, Any]]) -> dict[str, Any]:
     return {"entries": entries}
 
 
-def _public_book_entries(public_lorebooks: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _public_book_entries(
+    public_lorebooks: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
     """Flatten accessible public-lorebook ``worldInfo`` entries (with real keys)."""
     out: list[dict[str, Any]] = []
     for book in public_lorebooks or []:
-        entries = ((book.get("worldInfo") or {}).get("entries") or {})
+        entries = (book.get("worldInfo") or {}).get("entries") or {}
         for entry in entries.values():
             if not isinstance(entry, dict):
                 continue
@@ -478,24 +558,26 @@ def build_character_book(
             return
         seen.add(norm)
         order = len(book_entries)
-        book_entries.append({
-            "id": order,
-            "keys": keys if isinstance(keys, list) else [],
-            "secondary_keys": secondary if isinstance(secondary, list) else [],
-            "comment": str(comment or ""),
-            "content": text,
-            "constant": bool(constant),
-            "selective": not bool(constant),
-            "insertion_order": order,
-            "enabled": bool(enabled),
-            "position": "before_char",
-            "case_sensitive": False,
-            "name": str(comment or ""),
-            "priority": 10,
-            "use_regex": False,
-            "extensions": {},
-            "probability": 100,
-        })
+        book_entries.append(
+            {
+                "id": order,
+                "keys": keys if isinstance(keys, list) else [],
+                "secondary_keys": secondary if isinstance(secondary, list) else [],
+                "comment": str(comment or ""),
+                "content": text,
+                "constant": bool(constant),
+                "selective": not bool(constant),
+                "insertion_order": order,
+                "enabled": bool(enabled),
+                "position": "before_char",
+                "case_sensitive": False,
+                "name": str(comment or ""),
+                "priority": 10,
+                "use_regex": False,
+                "extensions": {},
+                "probability": 100,
+            }
+        )
 
     # 1) Public lorebook entries - preserve their real trigger keys.
     for entry in _public_book_entries(public_lorebooks):
@@ -616,7 +698,9 @@ def build_card_v3(
             "nickname": "",
             "creator_notes_multilingual": {},
             "source": [source_url] if source_url else [],
-            "assets": [{"type": "icon", "uri": "ccdefault:", "name": "main", "ext": "png"}],
+            "assets": [
+                {"type": "icon", "uri": "ccdefault:", "name": "main", "ext": "png"}
+            ],
             "creation_date": timestamp,
             "modification_date": timestamp,
             "extensions": _card_provenance(meta, source_url, character),
@@ -625,7 +709,9 @@ def build_card_v3(
     }
 
 
-def encode_card_png(avatar: str | bytes | None, cards: dict[str, dict[str, Any]]) -> bytes:
+def encode_card_png(
+    avatar: str | bytes | None, cards: dict[str, dict[str, Any]]
+) -> bytes:
     """Return PNG bytes: the avatar with card metadata embedded in text chunks.
 
     ``cards`` maps chunk keyword -> card dict, e.g.
@@ -663,7 +749,9 @@ def encode_card_png(avatar: str | bytes | None, cards: dict[str, dict[str, Any]]
 
     info = PngInfo()
     for keyword, card in cards.items():
-        payload = base64.b64encode(json.dumps(card, ensure_ascii=False).encode("utf-8")).decode("ascii")
+        payload = base64.b64encode(
+            json.dumps(card, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
         info.add_text(keyword, payload)
 
     buffer = BytesIO()
@@ -671,10 +759,16 @@ def encode_card_png(avatar: str | bytes | None, cards: dict[str, dict[str, Any]]
     return buffer.getvalue()
 
 
-def _update_library_index(library_dir: Path, character_id: str, result: dict[str, Any], entries: list[str]) -> None:
+def _update_library_index(
+    library_dir: Path, character_id: str, result: dict[str, Any], entries: list[str]
+) -> None:
     index_path = library_dir / "index.json"
     try:
-        index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+        index = (
+            json.loads(index_path.read_text(encoding="utf-8"))
+            if index_path.exists()
+            else {}
+        )
         if not isinstance(index, dict):
             index = {}
     except Exception:
@@ -691,13 +785,17 @@ def _update_library_index(library_dir: Path, character_id: str, result: dict[str
         "lorebookChars": len(result.get("lorebookText") or ""),
         "definitionSource": character.get("definitionSource") or "",
         "url": result.get("url") or "",
-        "extractedAt": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "extractedAt": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
         "file": f"{character_id}.png",
     }
     write_json(index_path, index)
 
 
-def save_to_library(library_dir: Path, character_id: str, result: dict[str, Any]) -> dict[str, str]:
+def save_to_library(
+    library_dir: Path, character_id: str, result: dict[str, Any]
+) -> dict[str, str]:
     """Store one extracted character as a single self-contained card PNG.
 
     Layout: ``<library_dir>/<uuid>.png`` (V3 card + embedded lorebook) plus a
@@ -709,13 +807,27 @@ def save_to_library(library_dir: Path, character_id: str, result: dict[str, Any]
     meta = result.get("meta") or {}
     public_lorebooks = result.get("publicLorebooks") or []
     source_url = result.get("url") or ""
-    card_v3 = build_card_v3(character, entries, meta=meta, public_lorebooks=public_lorebooks, source_url=source_url)
-    card_v2 = build_card_v2(character, entries, meta=meta, public_lorebooks=public_lorebooks, source_url=source_url)
+    card_v3 = build_card_v3(
+        character,
+        entries,
+        meta=meta,
+        public_lorebooks=public_lorebooks,
+        source_url=source_url,
+    )
+    card_v2 = build_card_v2(
+        character,
+        entries,
+        meta=meta,
+        public_lorebooks=public_lorebooks,
+        source_url=source_url,
+    )
 
     library_dir.mkdir(parents=True, exist_ok=True)
     png_path = library_dir / f"{character_id}.png"
     png_path.write_bytes(
-        encode_card_png(character.get("avatarBase64"), {"ccv3": card_v3, "chara": card_v2})
+        encode_card_png(
+            character.get("avatarBase64"), {"ccv3": card_v3, "chara": card_v2}
+        )
     )
 
     _update_library_index(library_dir, character_id, result, entries)

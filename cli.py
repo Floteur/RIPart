@@ -141,7 +141,9 @@ class RipGroup(click.RichGroup):
     cls=RipGroup,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
-@click.version_option(package_name="ripart", prog_name="rip", message="%(prog)s %(version)s")
+@click.version_option(
+    package_name="ripart", prog_name="rip", message="%(prog)s %(version)s"
+)
 def main() -> None:
     """[bold]RIPart[/] - rip characters & lorebooks from JanitorAI.
 
@@ -248,7 +250,12 @@ def login(timeout: int, headless: bool) -> None:
     default=False,
     help="Try Botasaurus' Cloudflare-bypass helper if a challenge blocks the import.",
 )
-@click.option("--verbose", is_flag=True, default=False, help="Print non-secret import diagnostics.")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    default=False,
+    help="Print non-secret import diagnostics.",
+)
 @headed_option
 def import_session(
     path: Path,
@@ -285,7 +292,9 @@ def import_session(
         if probe.get("status"):
             _field("login probe HTTP", probe["status"])
         if probe.get("cloudflare"):
-            _no("blocked by Cloudflare challenge - retry with [bold]--bypass-cloudflare[/]")
+            _no(
+                "blocked by Cloudflare challenge - retry with [bold]--bypass-cloudflare[/]"
+            )
 
     if verbose:
         _print_import_diagnostics(result.get("diagnostics") or {}, probe)
@@ -388,9 +397,13 @@ def inspect(url: str, headed: bool) -> None:
     read-only peek - nothing is triggered on the character.
     """
     result = inspect_task({"url": url}, **browser_kwargs(headed))
-    name = safe_name(result.get("characterName") or result.get("characterId") or "", "character")
+    name = safe_name(
+        result.get("characterName") or result.get("characterId") or "", "character"
+    )
     path = write_json(OUT / "inspections" / f"{name}.json", result)
-    _ok(f"inspected [bold]{result.get('characterName') or result.get('characterId')}[/]")
+    _ok(
+        f"inspected [bold]{result.get('characterName') or result.get('characterId')}[/]"
+    )
     _path("inspection", path)
     _field("public lorebooks", len(result.get("publicLorebooks") or []))
     _field("card public", result.get("cardPublic"))
@@ -446,7 +459,12 @@ def inspect(url: str, headed: bool) -> None:
     help="For allow_proxy=false characters: reconstruct the definition via a "
     "JanitorLLM injection leak (lossy; marked reconstructed-jllm).",
 )
-@click.option("--verbose", is_flag=True, default=False, help="Print non-secret extraction diagnostics.")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    default=False,
+    help="Print non-secret extraction diagnostics.",
+)
 @headed_option
 def extract(
     url: str,
@@ -489,7 +507,9 @@ def extract(
     elapsed = time.monotonic() - started
     paths = save_to_library(OUT / "library", result.get("characterId") or "", result)
 
-    _ok(f"extracted [bold]{result.get('characterName') or result.get('characterId') or url}[/]")
+    _ok(
+        f"extracted [bold]{result.get('characterName') or result.get('characterId') or url}[/]"
+    )
     _path("card png", paths["png"])
     _field("entries found", len(result.get("entries") or []))
     if (result.get("character") or {}).get("definitionSource") == "reconstructed-jllm":
@@ -586,7 +606,9 @@ def _print_extract_diagnostics(diagnostics: dict) -> None:
     help="[--extract] Also rip allow_proxy=false cards by reconstructing their "
     "definition via a JanitorLLM injection leak (phase 2; lossy).",
 )
-@click.option("--verbose", is_flag=True, default=False, help="Print progress diagnostics.")
+@click.option(
+    "--verbose", is_flag=True, default=False, help="Print progress diagnostics."
+)
 @headed_option
 def recent(
     limit: int,
@@ -611,7 +633,11 @@ def recent(
     """
     # UUIDs already ripped - the task skips these unless --force.
     library_dir = OUT / "library"
-    existing = [path.stem for path in library_dir.glob("*.png")] if library_dir.exists() else []
+    existing = (
+        [path.stem for path in library_dir.glob("*.png")]
+        if library_dir.exists()
+        else []
+    )
 
     started = time.monotonic()
     result = recent_task(
@@ -639,7 +665,9 @@ def recent(
 
     extracted = result.get("extracted")
     if extracted is None:
-        console.print(f"\n[dim]run again with [bold]--extract[/] to rip these cards · {_fmt_duration(elapsed)}[/]")
+        console.print(
+            f"\n[dim]run again with [bold]--extract[/] to rip these cards · {_fmt_duration(elapsed)}[/]"
+        )
         return
 
     _write_extracts(extracted)
@@ -687,20 +715,28 @@ def _write_extracts(extracted: list) -> None:
     console.print(summary)
     for entry in extracted:
         if entry.get("skipped"):
-            console.print(f"[dim]↷ {entry.get('name')} - already extracted (use --force)[/]")
+            console.print(
+                f"[dim]↷ {entry.get('name')} - already extracted (use --force)[/]"
+            )
             continue
         if entry.get("forbidden"):
-            console.print(f"[dim]⊘ {entry.get('name')} - proxies disabled (pass --jllm-leak to reconstruct)[/]")
+            console.print(
+                f"[dim]⊘ {entry.get('name')} - proxies disabled (pass --jllm-leak to reconstruct)[/]"
+            )
             continue
         if not entry.get("ok"):
             _no(f"{entry.get('name')} - {entry.get('error')}")
             continue
         result = entry.get("result") or {}
-        paths = save_to_library(OUT / "library", result.get("characterId") or "", result)
+        paths = save_to_library(
+            OUT / "library", result.get("characterId") or "", result
+        )
         secs = entry.get("seconds")
         timing = f" [dim]({secs}s)[/]" if secs is not None else ""
         tag = " [yellow](jllm-reconstructed)[/]" if entry.get("reconstructed") else ""
-        _ok(f"{result.get('characterName') or entry.get('name')}{tag} - {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]")
+        _ok(
+            f"{result.get('characterName') or entry.get('name')}{tag} - {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]"
+        )
 
 
 def _fmt_expiry(seconds: float) -> str:
@@ -742,7 +778,9 @@ def saucepan() -> None:
 
 
 @saucepan.command("login")
-@click.option("--username", prompt=True, help="Your Saucepan username (prompted if omitted).")
+@click.option(
+    "--username", prompt=True, help="Your Saucepan username (prompted if omitted)."
+)
 @click.option(
     "--password",
     prompt=True,
@@ -875,16 +913,22 @@ def _saucepan_extract(
         if leak_config:
             resolved = sp.resolve_provider_config(leak_config)
             if not resolved:
-                _no(f"no provider config matching [bold]{leak_config}[/] - see [bold]rip saucepan providers[/]")
+                _no(
+                    f"no provider config matching [bold]{leak_config}[/] - see [bold]rip saucepan providers[/]"
+                )
                 raise SystemExit(1)
             leak_config = resolved
         else:
             configs = [c for c in sp.list_provider_configs() if c.get("is_visible")]
             if not configs:
-                _no("no BYOK provider config for --leak - add one on saucepan.ai, or pass --leak-model")
+                _no(
+                    "no BYOK provider config for --leak - add one on saucepan.ai, or pass --leak-model"
+                )
                 raise SystemExit(1)
             leak_config = configs[0].get("config_id")
-            console.print(f"[dim]leak model: {configs[0].get('config_name')} ({configs[0].get('model_id')})[/]")
+            console.print(
+                f"[dim]leak model: {configs[0].get('config_name')} ({configs[0].get('model_id')})[/]"
+            )
 
     started = time.monotonic()
     try:
@@ -908,16 +952,30 @@ def _saucepan_extract(
     _path("card png", paths["png"])
     character = result.get("character") or {}
     diagnostics = result.get("diagnostics") or {}
-    greetings = (1 if character.get("firstMessage") else 0) + len(character.get("alternateGreetings") or [])
+    greetings = (1 if character.get("firstMessage") else 0) + len(
+        character.get("alternateGreetings") or []
+    )
     _field("greetings", greetings)
-    _field("lorebook entries", f"{diagnostics.get('lorebookEntries', 0)} in {diagnostics.get('lorebooks', 0)} book(s)")
+    _field(
+        "lorebook entries",
+        f"{diagnostics.get('lorebookEntries', 0)} in {diagnostics.get('lorebooks', 0)} book(s)",
+    )
     source = character.get("definitionSource")
     if source == "saucepan-leak":
-        _field("definition", f"[green]leaked {diagnostics.get('leakChars', 0)} chars via model[/] [dim](lossy)[/]")
+        _field(
+            "definition",
+            f"[green]leaked {diagnostics.get('leakChars', 0)} chars via model[/] [dim](lossy)[/]",
+        )
     elif leak and diagnostics.get("leakError"):
-        _field("definition", f"[yellow]leak failed: {diagnostics['leakError']} - kept public data[/]")
+        _field(
+            "definition",
+            f"[yellow]leak failed: {diagnostics['leakError']} - kept public data[/]",
+        )
     elif source == "saucepan-partial":
-        _field("definition", "[yellow]partial - definition gated, body/greetings from public data[/]")
+        _field(
+            "definition",
+            "[yellow]partial - definition gated, body/greetings from public data[/]",
+        )
     _field("time", _fmt_duration(elapsed))
 
 

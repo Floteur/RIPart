@@ -156,7 +156,9 @@ def assemble_fragments(content: dict[str, Any] | None) -> str:
         if not isinstance(frag, dict) or not isinstance(frag.get("text"), str):
             continue
         derived_key = (int(frag.get("key") or 0) ^ mask) & _U32
-        if _fragment_hash(mask, derived_key, frag["text"]) == (int(frag.get("proof") or 0) & _U32):
+        if _fragment_hash(mask, derived_key, frag["text"]) == (
+            int(frag.get("proof") or 0) & _U32
+        ):
             survivors.append(frag)
 
     survivors.sort(key=lambda f: (int(f.get("key") or 0) ^ mask) & _U32)
@@ -183,7 +185,9 @@ def _get_json(path: str, with_auth: bool) -> tuple[bool, int, Any]:
     return response.ok, response.status_code, data
 
 
-def _post_json(path: str, body: dict[str, Any], with_auth: bool = True) -> tuple[bool, int, Any]:
+def _post_json(
+    path: str, body: dict[str, Any], with_auth: bool = True
+) -> tuple[bool, int, Any]:
     try:
         response = requests.post(
             f"{SAUCEPAN_BASE}{path}",
@@ -227,7 +231,10 @@ def login(username: str, password: str) -> str:
                 "Content-Type": "application/json",
             },
             # Saucepan's API names this field "handle" on the wire.
-            json={"handle": str(username or "").strip(), "password": str(password or "")},
+            json={
+                "handle": str(username or "").strip(),
+                "password": str(password or ""),
+            },
             timeout=TIMEOUT,
         )
     except requests.RequestException as exc:
@@ -238,12 +245,21 @@ def login(username: str, password: str) -> str:
     except ValueError:
         data = {}
     if not response.ok:
-        message = (data.get("error") or {}).get("message") if isinstance(data, dict) else None
-        raise SaucepanError(message or f"Saucepan HTTP {response.status_code}", response.status_code)
+        message = (
+            (data.get("error") or {}).get("message") if isinstance(data, dict) else None
+        )
+        raise SaucepanError(
+            message or f"Saucepan HTTP {response.status_code}", response.status_code
+        )
 
     token = None
     if isinstance(data, dict):
-        token = data.get("token") or data.get("access_token") or data.get("session_token") or data.get("sessionToken")
+        token = (
+            data.get("token")
+            or data.get("access_token")
+            or data.get("session_token")
+            or data.get("sessionToken")
+        )
     if not token:
         raise SaucepanError("login succeeded but no token was returned")
     set_token(token)
@@ -280,11 +296,18 @@ def _companion_creator(companion: dict[str, Any]) -> tuple[str, str]:
     """Best-effort (creator_name, creator_id) from a companion payload."""
     # v2 companions expose the author inline as author_handle / author_id.
     if companion.get("author_handle") or companion.get("author_id"):
-        return str(companion.get("author_handle") or "").strip(), str(companion.get("author_id") or "")
+        return str(companion.get("author_handle") or "").strip(), str(
+            companion.get("author_id") or ""
+        )
     for key in ("creator", "user", "owner", "author"):
         holder = companion.get(key)
         if isinstance(holder, dict):
-            name = holder.get("display_name") or holder.get("handle") or holder.get("name") or ""
+            name = (
+                holder.get("display_name")
+                or holder.get("handle")
+                or holder.get("name")
+                or ""
+            )
             return str(name).strip(), str(holder.get("id") or "")
     return "", ""
 
@@ -365,7 +388,9 @@ def _fetch_chapter_fragments(lorebook_id: str) -> list[dict[str, Any]]:
         # The list is metadata only; the fragments live on the per-chapter route.
         index = meta.get("index", position) if isinstance(meta, dict) else position
         title = (meta.get("title") if isinstance(meta, dict) else "") or ""
-        cok, _cstatus, cdata = _get_json(f"/api/v2/lorebooks/{lid}/chapters/{index}", True)
+        cok, _cstatus, cdata = _get_json(
+            f"/api/v2/lorebooks/{lid}/chapters/{index}", True
+        )
         if not cok or not isinstance(cdata, dict):
             continue
         text = assemble_fragments(cdata.get("text_fragments"))
@@ -397,7 +422,8 @@ def fetch_lorebook(lorebook_id: str) -> dict[str, Any] | None:
 def fetch_companion_lorebooks(companion_id: str) -> list[dict[str, Any]]:
     """Fetch every lorebook attached to a companion (best effort; skips failures)."""
     ok, _status, data = _get_json(
-        f"/api/v2/companions/{requests.utils.quote(str(companion_id), safe='')}/lorebooks", True
+        f"/api/v2/companions/{requests.utils.quote(str(companion_id), safe='')}/lorebooks",
+        True,
     )
     if not ok or not isinstance(data, dict):
         return []
@@ -450,7 +476,10 @@ def resolve_provider_config(name_or_id: str) -> str | None:
             return wanted
     low = wanted.lower()
     for cfg in configs:
-        if str(cfg.get("config_name") or "").lower() == low or str(cfg.get("model_id") or "").lower() == low:
+        if (
+            str(cfg.get("config_name") or "").lower() == low
+            or str(cfg.get("model_id") or "").lower() == low
+        ):
             return cfg.get("config_id")
     return None
 
@@ -469,7 +498,11 @@ def create_chat(companion_id: str, name: str = "ripart-leak") -> str:
 def archive_chat(chat_id: str) -> None:
     """Archive a chat (used to tidy up the throwaway leak chat). Best effort."""
     try:
-        _post_json(f"/api/v1/chats/{requests.utils.quote(str(chat_id), safe='')}/archive", {}, True)
+        _post_json(
+            f"/api/v1/chats/{requests.utils.quote(str(chat_id), safe='')}/archive",
+            {},
+            True,
+        )
     except SaucepanError:
         pass
 
@@ -492,20 +525,27 @@ def _run_generation(
         "mode": mode,
     }
     if provider_config_id:
-        body["generation_config"] = {"openaiprovider": {"config_id": provider_config_id}}
+        body["generation_config"] = {
+            "openaiprovider": {"config_id": provider_config_id}
+        }
     elif model_alias:
         body["generation_config"] = {"saucepan": {"model_alias": model_alias}}
 
     ok, status, data = _post_json("/api/v2/chat/generate", body)
     if not ok or not isinstance(data, dict) or not data.get("generation_id"):
-        message = (data.get("error") or {}).get("message") if isinstance(data, dict) else None
-        raise SaucepanError(message or f"generation request failed (HTTP {status})", status)
+        message = (
+            (data.get("error") or {}).get("message") if isinstance(data, dict) else None
+        )
+        raise SaucepanError(
+            message or f"generation request failed (HTTP {status})", status
+        )
     generation_id = data["generation_id"]
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         pok, _pstatus, poll = _get_json(
-            f"/api/v2/chat/generation/{requests.utils.quote(str(generation_id), safe='')}/poll", True
+            f"/api/v2/chat/generation/{requests.utils.quote(str(generation_id), safe='')}/poll",
+            True,
         )
         poll = poll if isinstance(poll, dict) else {}
         state = poll.get("status") or poll.get("state")
@@ -536,7 +576,9 @@ def leak_definition(
     Returns the raw leaked text. Raises SaucepanError if every attempt fails.
     """
     if not has_token():
-        raise SaucepanError("no Saucepan token configured - run `rip saucepan login` first", 401)
+        raise SaucepanError(
+            "no Saucepan token configured - run `rip saucepan login` first", 401
+        )
     companion_id = parse_companion_id(url)
     if not companion_id:
         raise SaucepanError("not a Saucepan companion URL", 400)
@@ -624,7 +666,7 @@ def _split_example_section(text: str) -> tuple[str, str]:
     if not header:
         return text, ""
     definition = text[: header.start()].strip()
-    example = text[header.end():].strip()
+    example = text[header.end() :].strip()
     # Stop the example section at the next top-level header, if any.
     nxt = re.search(r"(?im)^\s*[#\[]{1,2}\s*\S.*$", example)
     if nxt and nxt.start() > 0:
@@ -678,13 +720,16 @@ def extract_companion(
     compliant model is required (Saucepan's default one refuses).
     """
     if not has_token():
-        raise SaucepanError("no Saucepan token configured - run `rip saucepan login` first", 401)
+        raise SaucepanError(
+            "no Saucepan token configured - run `rip saucepan login` first", 401
+        )
     companion_id = parse_companion_id(url)
     if not companion_id:
         raise SaucepanError("not a Saucepan companion URL", 400)
 
     def_ok, def_status, def_data = _get_json(
-        f"/api/v1/companion/definition?companion_id={requests.utils.quote(companion_id, safe='')}", True
+        f"/api/v1/companion/definition?companion_id={requests.utils.quote(companion_id, safe='')}",
+        True,
     )
     comp_ok, comp_status, comp_data = _get_json(
         f"/api/v2/companions/{requests.utils.quote(companion_id, safe='')}", True
@@ -698,7 +743,11 @@ def extract_companion(
     sections: dict[str, str] = {}
     if def_ok and isinstance(def_data, dict):
         for section in def_data.get("sections") or []:
-            if isinstance(section, dict) and section.get("title") and section.get("content"):
+            if (
+                isinstance(section, dict)
+                and section.get("title")
+                and section.get("content")
+            ):
                 sections[section["title"]] = assemble_fragments(section["content"])
 
     # Body: prefer the definition's "Companion Core", fall back to the v2 body.
@@ -714,12 +763,16 @@ def extract_companion(
         if not message and isinstance(comp_data, dict):
             message = (comp_data.get("error") or {}).get("message")
         status = def_status if not def_ok else comp_status
-        raise SaucepanError(message or f"Saucepan HTTP {status}", 401 if status == 401 else 502)
+        raise SaucepanError(
+            message or f"Saucepan HTTP {status}", 401 if status == 401 else 502
+        )
 
     # Greetings live only on the v2 companion as starting scenarios.
     greetings: list[str] = []
     for scenario in companion.get("starting_scenarios_fragments") or []:
-        text = assemble_fragments(scenario.get("message") if isinstance(scenario, dict) else None)
+        text = assemble_fragments(
+            scenario.get("message") if isinstance(scenario, dict) else None
+        )
         if text and text.strip():
             greetings.append(text)
 
@@ -732,7 +785,9 @@ def extract_companion(
     if sections.get("Advanced Prompt"):
         notes_parts.append(f"--- Advanced Prompt ---\n{sections['Advanced Prompt']}")
     if sections.get("Response Formatting Instructions"):
-        notes_parts.append(f"--- Response Formatting ---\n{sections['Response Formatting Instructions']}")
+        notes_parts.append(
+            f"--- Response Formatting ---\n{sections['Response Formatting Instructions']}"
+        )
     if not def_ok:
         notes_parts.append(
             "--- Note ---\nThis companion's definition is not open, so example dialogue and "
@@ -749,7 +804,9 @@ def extract_companion(
     creator_name, creator_id = _companion_creator(companion)
     is_nsfw = bool(companion.get("is_nsfw") or companion.get("nsfw"))
 
-    public_lorebooks = fetch_companion_lorebooks(companion_id) if include_lorebooks else []
+    public_lorebooks = (
+        fetch_companion_lorebooks(companion_id) if include_lorebooks else []
+    )
 
     character = {
         "name": name,
@@ -792,7 +849,9 @@ def extract_companion(
             leak_error = str(exc)
 
     return {
-        "url": url if url.startswith(("http://", "https://")) else f"{SAUCEPAN_BASE}/companion/{companion_id}",
+        "url": url
+        if url.startswith(("http://", "https://"))
+        else f"{SAUCEPAN_BASE}/companion/{companion_id}",
         "characterId": companion_id,
         "characterName": name,
         "character": character,
@@ -806,7 +865,8 @@ def extract_companion(
             "definitionOpen": bool(def_ok),
             "lorebooks": len(public_lorebooks),
             "lorebookEntries": sum(
-                len((b.get("worldInfo") or {}).get("entries") or {}) for b in public_lorebooks
+                len((b.get("worldInfo") or {}).get("entries") or {})
+                for b in public_lorebooks
             ),
             "leakChars": leak_chars,
             "leakError": leak_error,
