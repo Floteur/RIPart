@@ -1,7 +1,7 @@
 [project]
 name = "ripart"
 version = "0.1.0"
-description = "RIPart - a browser-driven CLI to rip characters & lorebooks from JanitorAI."
+description = "RIPart - a browser-driven library and CLI to rip characters & lorebooks from JanitorAI and Saucepan."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

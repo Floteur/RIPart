@@ -1,10 +1,12 @@
 # RIPart
 
-A small, browser-driven command-line tool for ripping character cards and
-lorebooks from [JanitorAI](https://janitorai.com). It drives a real (headless)
-Chrome via [Botasaurus](https://github.com/omkarcloud/botasaurus), so it sees
-exactly what your browser sees - including private card definitions surfaced
-through the `generateAlpha` endpoint.
+A small, browser-driven tool for ripping character cards and lorebooks from
+[JanitorAI](https://janitorai.com) — usable both as a **command-line tool** and
+as an **importable Python library** (see [Use as a library](#use-as-a-library)).
+It drives a real (headless) Chrome via
+[Botasaurus](https://github.com/omkarcloud/botasaurus), so it sees exactly what
+your browser sees - including private card definitions surfaced through the
+`generateAlpha` endpoint.
 
 ## Requirements
 
@@ -39,6 +41,60 @@ rip extract <url>    # 4. rip the full card + lorebook
 `<url>` can be a full JanitorAI character URL **or** just its UUID.
 
 Results are written under `output/cli/` (relative to the project root).
+
+## Use as a library
+
+RIPart is also importable — drop it into any Python script instead of shelling
+out to the CLI. Install it into your own environment first:
+
+```bash
+pip install ripart            # or: uv add ripart
+# from a local checkout: pip install -e .
+```
+
+Then:
+
+```python
+import ripart
+
+# Log in once (opens a browser). The session is saved and reused across
+# later calls and processes, so you rarely need to repeat this.
+if not ripart.is_logged_in():
+    ripart.login()
+
+# Rip a character's full card + lorebook. Works with a full JanitorAI URL,
+# a bare UUID, or a saucepan.ai/companion/<id> URL (routed automatically).
+result = ripart.extract("https://janitorai.com/characters/<uuid>_name")
+
+print(result["characterName"])
+print(result["savedPath"])          # ripart-output/library/<uuid>.png
+print(len(result["entries"]), "lorebook entries")
+
+# Peek without ripping:
+meta = ripart.inspect("<uuid>")
+
+# List the newest cards, optionally ripping each into the library:
+listing = ripart.recent(limit=10, extract=True)
+```
+
+Every function returns a plain `dict` — the same data the CLI prints — so it's
+easy to inspect, serialise to JSON, or post-process. `extract()` saves a
+self-contained V3 card PNG by default; pass `save=False` to get the data
+without writing to disk, or `output_dir=...` to choose where it lands
+(default: `./ripart-output/`).
+
+For Saucepan you authenticate once with a token instead of a browser:
+
+```python
+import ripart
+
+ripart.saucepan.login("username", "password")   # stores a bearer token
+result = ripart.extract("https://saucepan.ai/companion/<id>")
+```
+
+The lower-level Saucepan helpers (`fetch_lorebook`, `leak_definition`,
+`list_provider_configs`, …) live under `ripart.saucepan`. See
+`help(ripart.api)` for the full high-level API.
 
 ## Commands
 
