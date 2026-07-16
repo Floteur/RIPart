@@ -68,7 +68,7 @@ click.rich_click.COMMAND_GROUPS = {
     ],
     "rip saucepan": [
         {"name": "Session & login", "commands": ["login", "status", "logout"]},
-        {"name": "Ripping", "commands": ["extract"]},
+        {"name": "Ripping", "commands": ["extract", "providers"]},
     ],
 }
 
@@ -127,7 +127,7 @@ class RipGroup(click.RichGroup):
     def invoke(self, ctx: click.Context):
         try:
             return super().invoke(ctx)
-        except (click.ClickException, click.Abort, SystemExit):
+        except (click.ClickException, click.Abort, click.exceptions.Exit, SystemExit):
             raise
         except Exception as exc:  # noqa: BLE001 - deliberately broad, user-facing
             if os.environ.get("RIP_DEBUG"):
@@ -703,11 +703,222 @@ def _write_extracts(extracted: list) -> None:
         _ok(f"{result.get('characterName') or entry.get('name')}{tag} — {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]")
 
 
+def _fmt_expiry(seconds: float) -> str:
+    """Coarse human duration for token lifetimes (days / hours / minutes)."""
+    if seconds >= 86400:
+        return f"{seconds / 86400:.1f}d"
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f}h"
+    return f"{max(0, int(seconds // 60))}m"
+
+
 def _fmt_duration(seconds: float) -> str:
     if seconds < 60:
         return f"{seconds:.1f}s"
     minutes, secs = divmod(int(round(seconds)), 60)
     return f"{minutes}m{secs:02d}s"
+
+
+# --------------------------------------------------------------------------- #
+# saucepan
+# --------------------------------------------------------------------------- #
+
+
+@main.group(cls=click.RichGroup)
+def saucepan() -> None:
+    """Rip companions from [bold]saucepan.ai[/] via its REST API (no browser).
+
+    Saucepan serves companion definitions through an authenticated API, so
+    ripping is a direct, exact pull rather than a browser reconstruction. Log in
+    once, then extract:
+
+    \b
+      1. rip saucepan login            store a bearer token (reused afterwards)
+      2. rip saucepan status           confirm a token is configured
+      3. rip saucepan extract <url>    rip a companion card
+
+    A [cyan]saucepan.ai[/] URL passed to [bold]rip extract[/] is routed here too.
+    """
+
+
+@saucepan.command("login")
+@click.option("--username", prompt=True, help="Your Saucepan username (prompted if omitted).")
+@click.option(
+    "--password",
+    prompt=True,
+    hide_input=True,
+    help="Your Saucepan password (prompted, hidden, if omitted).",
+)
+def saucepan_login(username: str, password: str) -> None:
+    """Log in with your username + password and store a bearer token."""
+    sp.login(username, password)
+    _ok("logged in — token saved")
+    _path("token file", sp.TOKEN_FILE)
+
+
+@saucepan.command("status")
+def saucepan_status() -> None:
+    """Report whether a Saucepan token is configured (and still valid)."""
+    if not sp.has_token():
+        _no("no Saucepan token — run [bold]rip saucepan login[/] first")
+        sys.exit(1)
+    exp = sp.token_expiry()
+    if exp is not None:
+        remaining = exp - time.time()
+        if remaining <= 0:
+            _no("Saucepan token expired — run [bold]rip saucepan login[/] again")
+            sys.exit(1)
+        _ok(f"Saucepan token configured [dim](expires in {_fmt_expiry(remaining)})[/]")
+    else:
+        _ok("Saucepan token configured")
+    sys.exit(0)
+
+
+@saucepan.command("logout")
+def saucepan_logout() -> None:
+    """Forget the stored Saucepan token."""
+    sp.clear_token()
+    _ok("Saucepan token cleared")
+
+
+@saucepan.command("providers")
+def saucepan_providers() -> None:
+    """List your BYOK model provider configs (usable with [bold]extract --leak[/])."""
+    configs = sp.list_provider_configs()
+    if not configs:
+        _no("no provider configs — add one on saucepan.ai (Settings → Model Providers)")
+        return
+    table = Table(box=None, pad_edge=False, show_edge=False)
+    table.add_column("name", style="bold")
+    table.add_column("model", style="cyan")
+    table.add_column("provider")
+    table.add_column("config_id", style="dim")
+    for cfg in configs:
+        table.add_row(
+            str(cfg.get("config_name") or "—"),
+            str(cfg.get("model_id") or "—"),
+            str(cfg.get("provider") or "—"),
+            str(cfg.get("config_id") or ""),
+        )
+    console.print(table)
+
+
+@saucepan.command("extract")
+@click.argument("url", metavar="URL_OR_UUID")
+@click.option(
+    "--no-lorebooks",
+    is_flag=True,
+    default=False,
+    help="Skip the companion's attached lorebooks (card only).",
+)
+@click.option(
+    "--leak",
+    is_flag=True,
+    default=False,
+    help="Recover the gated definition (example dialogue / advanced prompt) by having a "
+    "model dump it in a throwaway chat. Creates a chat and spends a generation. Lossy; "
+    "marks the card 'saucepan-leak'.",
+)
+@click.option(
+    "--leak-config",
+    metavar="NAME_OR_ID",
+    default=None,
+    help="[--leak] BYOK provider config to run the leak through (name or id; see "
+    "[bold]rip saucepan providers[/]). Saucepan's default model refuses, so a compliant "
+    "model is needed. Defaults to your first visible config.",
+)
+@click.option(
+    "--leak-model",
+    metavar="ALIAS",
+    default=None,
+    help="[--leak] Use a Saucepan model_alias instead of a BYOK provider config.",
+)
+@click.option(
+    "--leak-mode",
+    type=click.Choice(["director", "user"]),
+    default="director",
+    show_default=True,
+    help="[--leak] Generation mode; 'director' (OOC) usually complies best.",
+)
+def saucepan_extract(
+    url: str,
+    no_lorebooks: bool,
+    leak: bool,
+    leak_config: str | None,
+    leak_model: str | None,
+    leak_mode: str,
+) -> None:
+    """Rip a Saucepan companion card + lorebooks by URL (or bare companion id)."""
+    _saucepan_extract(
+        url,
+        include_lorebooks=not no_lorebooks,
+        leak=leak,
+        leak_config=leak_config,
+        leak_model=leak_model,
+        leak_mode=leak_mode,
+    )
+
+
+def _saucepan_extract(
+    url: str,
+    *,
+    include_lorebooks: bool = True,
+    leak: bool = False,
+    leak_config: str | None = None,
+    leak_model: str | None = None,
+    leak_mode: str = "director",
+) -> None:
+    """Shared implementation for [rip saucepan extract] and [rip extract <sp url>]."""
+    # Resolve the BYOK config (by name or id) up front so we fail fast with a
+    # helpful list rather than mid-extraction.
+    if leak and not leak_model:
+        if leak_config:
+            resolved = sp.resolve_provider_config(leak_config)
+            if not resolved:
+                _no(f"no provider config matching [bold]{leak_config}[/] — see [bold]rip saucepan providers[/]")
+                raise SystemExit(1)
+            leak_config = resolved
+        else:
+            configs = [c for c in sp.list_provider_configs() if c.get("is_visible")]
+            if not configs:
+                _no("no BYOK provider config for --leak — add one on saucepan.ai, or pass --leak-model")
+                raise SystemExit(1)
+            leak_config = configs[0].get("config_id")
+            console.print(f"[dim]leak model: {configs[0].get('config_name')} ({configs[0].get('model_id')})[/]")
+
+    started = time.monotonic()
+    try:
+        result = sp.extract_companion(
+            url,
+            include_lorebooks=include_lorebooks,
+            leak=leak,
+            leak_config=leak_config,
+            leak_model=leak_model,
+            leak_mode=leak_mode,
+        )
+    except sp.SaucepanError as exc:
+        _no(str(exc))
+        if exc.status == 401:
+            err_console.print("[dim]run [bold]rip saucepan login[/] to authenticate[/]")
+        raise SystemExit(1)
+    elapsed = time.monotonic() - started
+    paths = save_to_library(OUT / "library", result.get("characterId") or "", result)
+
+    _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](saucepan)[/]")
+    _path("card png", paths["png"])
+    character = result.get("character") or {}
+    diagnostics = result.get("diagnostics") or {}
+    greetings = (1 if character.get("firstMessage") else 0) + len(character.get("alternateGreetings") or [])
+    _field("greetings", greetings)
+    _field("lorebook entries", f"{diagnostics.get('lorebookEntries', 0)} in {diagnostics.get('lorebooks', 0)} book(s)")
+    source = character.get("definitionSource")
+    if source == "saucepan-leak":
+        _field("definition", f"[green]leaked {diagnostics.get('leakChars', 0)} chars via model[/] [dim](lossy)[/]")
+    elif leak and diagnostics.get("leakError"):
+        _field("definition", f"[yellow]leak failed: {diagnostics['leakError']} — kept public data[/]")
+    elif source == "saucepan-partial":
+        _field("definition", "[yellow]partial — definition gated, body/greetings from public data[/]")
+    _field("time", _fmt_duration(elapsed))
 
 
 # --------------------------------------------------------------------------- #
