@@ -897,6 +897,19 @@ def saucepan_extract(
     )
 
 
+def _rank_leak_configs(configs: list[dict]) -> list[dict]:
+    """Order provider configs for --leak auto-pick: visible first, real providers
+    before ad-hoc 'custom' ones (which are often half-configured), then by the
+    user's own sort_order."""
+    visible = [c for c in configs if c.get("is_visible")]
+
+    def rank(cfg: dict) -> tuple:
+        is_custom = 1 if str(cfg.get("provider") or "").lower() == "custom" else 0
+        return (is_custom, cfg.get("sort_order") if isinstance(cfg.get("sort_order"), int) else 999)
+
+    return sorted(visible, key=rank)
+
+
 def _saucepan_extract(
     url: str,
     *,
@@ -907,6 +920,11 @@ def _saucepan_extract(
     leak_mode: str = "director",
 ) -> None:
     """Shared implementation for [rip saucepan extract] and [rip extract <sp url>]."""
+    if leak and leak_config and leak_model:
+        console.print(
+            "[yellow]![/] both --leak-config and --leak-model given; using --leak-config"
+        )
+        leak_model = None
     # Resolve the BYOK config (by name or id) up front so we fail fast with a
     # helpful list rather than mid-extraction.
     if leak and not leak_model:
@@ -919,7 +937,7 @@ def _saucepan_extract(
                 raise SystemExit(1)
             leak_config = resolved
         else:
-            configs = [c for c in sp.list_provider_configs() if c.get("is_visible")]
+            configs = _rank_leak_configs(sp.list_provider_configs())
             if not configs:
                 _no(
                     "no BYOK provider config for --leak - add one on saucepan.ai, or pass --leak-model"
@@ -946,10 +964,21 @@ def _saucepan_extract(
             err_console.print("[dim]run [bold]rip saucepan login[/] to authenticate[/]")
         raise SystemExit(1)
     elapsed = time.monotonic() - started
-    paths = save_to_library(OUT / "library", result.get("characterId") or "", result)
+    library_dir = OUT / "library"
+    paths = save_to_library(library_dir, result.get("characterId") or "", result)
+
+    # Persist the raw leaked dump next to the card — the parsed merge is lossy,
+    # so keeping the verbatim text lets you review or hand-fix it.
+    leak_raw = result.get("leakRaw") or ""
+    leak_path = None
+    if leak_raw:
+        leak_path = library_dir / f"{result.get('characterId') or 'card'}.leak.txt"
+        leak_path.write_text(leak_raw, encoding="utf-8")
 
     _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](saucepan)[/]")
     _path("card png", paths["png"])
+    if leak_path is not None:
+        _path("raw leak", leak_path)
     character = result.get("character") or {}
     diagnostics = result.get("diagnostics") or {}
     greetings = (1 if character.get("firstMessage") else 0) + len(

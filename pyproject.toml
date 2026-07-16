@@ -11,6 +11,10 @@ dependencies = [
     "pillow>=10.0.0",
 ]
 
+[project.optional-dependencies]
+# Dev/test extras: `uv sync --extra dev` (or `pip install -e .[dev]`).
+dev = ["pytest>=8"]
+
 [project.scripts]
 rip = "ripart.cli:main"
 
@@ -27,3 +31,8 @@ packages = ["ripart"]
 
 [tool.setuptools.package-dir]
 ripart = "."
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The tests import the installed `ripart` package (see the flat layout above);
+# they can also be run without pytest: `python tests/test_saucepan.py`.

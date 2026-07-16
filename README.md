@@ -115,6 +115,8 @@ Notes and caveats:
   RIPart retries a few times and detects refusals. On success the card is marked
   `definitionSource: saucepan-leak`; if every attempt fails it falls back to the
   normal `saucepan-partial` card and tells you why.
+- **The raw dump is saved** next to the card as
+  `output/cli/library/<id>.leak.txt`, so you can review or hand-fix the (lossy) parse.
 
 ### Examples
 
@@ -166,6 +168,16 @@ output/cli/
   see the full traceback, e.g. `RIP_DEBUG=1 rip extract <url>`.
 - **Want to see the browser?** Add `--headed` to any command.
 
+## Tests
+
+Pure (network-free) unit tests for the Saucepan parsing/reassembly live under
+`tests/`:
+
+```bash
+uv sync --extra dev && uv run pytest    # with pytest
+python tests/test_saucepan.py           # standalone, no dependencies
+```
+
 ## Layout
 
 ```
@@ -174,6 +186,7 @@ ripart/
 ├── cli.py             # command-line interface (this is the user-facing layer)
 ├── browser_tasks.py   # Botasaurus tasks that drive the browser (JanitorAI)
 ├── saucepan.py        # Saucepan REST extraction (no browser)
+├── tests/             # unit tests for the Saucepan pure functions
 ├── helpers.py         # parsing / formatting utilities
 └── __main__.py        # enables `python -m ripart`
 ```

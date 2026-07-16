@@ -22,6 +22,7 @@ browser profile.
 from __future__ import annotations
 
 import base64
+import os
 import re
 import time
 from pathlib import Path
@@ -59,16 +60,27 @@ def load_token() -> str:
     """Read the persisted token into memory (called on first use)."""
     global _token
     if not _token and TOKEN_FILE.exists():
+        # Tighten perms on an existing (possibly world-readable) token file.
+        try:
+            if (TOKEN_FILE.stat().st_mode & 0o077) != 0:
+                os.chmod(TOKEN_FILE, 0o600)
+        except OSError:
+            pass
         _token = TOKEN_FILE.read_text(encoding="utf-8").strip()
     return _token
 
 
 def set_token(value: str) -> None:
-    """Store a token both in memory and on disk."""
+    """Store a token both in memory and on disk (owner-only file perms)."""
     global _token
     _token = str(value or "").strip()
     if _token:
         TOKEN_FILE.write_text(_token, encoding="utf-8")
+        # Bearer token at rest — keep it readable only by the owner.
+        try:
+            os.chmod(TOKEN_FILE, 0o600)
+        except OSError:
+            pass
 
 
 def clear_token() -> None:
@@ -170,39 +182,64 @@ def assemble_fragments(content: dict[str, Any] | None) -> str:
 # --------------------------------------------------------------------------- #
 
 
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF = 0.75  # seconds; exponential (0.75s, 1.5s, ...)
+
+
+def _request_json(
+    method: str,
+    path: str,
+    *,
+    with_auth: bool,
+    json_body: dict[str, Any] | None = None,
+    attempts: int = 1,
+    retry_5xx: bool = False,
+) -> tuple[bool, int, Any]:
+    """One HTTP round trip returning ``(ok, status, parsed_json_or_None)``.
+
+    Retries up to ``attempts`` times with exponential backoff on network errors
+    and (when ``retry_5xx``) transient 5xx responses. Only GETs retry — POSTs
+    here create chats / generations and must not be silently repeated.
+    """
+    url = f"{SAUCEPAN_BASE}{path}"
+    headers = _headers(with_auth)
+    if json_body is not None:
+        headers = {**headers, "Content-Type": "application/json"}
+
+    for attempt in range(max(1, attempts)):
+        last = attempt == attempts - 1
+        try:
+            response = requests.request(
+                method, url, headers=headers, json=json_body, timeout=TIMEOUT
+            )
+        except requests.RequestException as exc:
+            if last:
+                raise SaucepanError(f"network error talking to Saucepan: {exc}") from exc
+            time.sleep(_RETRY_BACKOFF * (2**attempt))
+            continue
+        if retry_5xx and response.status_code >= 500 and not last:
+            time.sleep(_RETRY_BACKOFF * (2**attempt))
+            continue
+        data: Any = None
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        return response.ok, response.status_code, data
+    raise SaucepanError("request failed")  # pragma: no cover - loop always returns/raises
+
+
 def _get_json(path: str, with_auth: bool) -> tuple[bool, int, Any]:
-    try:
-        response = requests.get(
-            f"{SAUCEPAN_BASE}{path}", headers=_headers(with_auth), timeout=TIMEOUT
-        )
-    except requests.RequestException as exc:
-        raise SaucepanError(f"network error talking to Saucepan: {exc}") from exc
-    data: Any = None
-    try:
-        data = response.json()
-    except ValueError:
-        data = None
-    return response.ok, response.status_code, data
+    return _request_json(
+        "GET", path, with_auth=with_auth, attempts=_RETRY_ATTEMPTS, retry_5xx=True
+    )
 
 
 def _post_json(
     path: str, body: dict[str, Any], with_auth: bool = True
 ) -> tuple[bool, int, Any]:
-    try:
-        response = requests.post(
-            f"{SAUCEPAN_BASE}{path}",
-            headers={**_headers(with_auth), "Content-Type": "application/json"},
-            json=body,
-            timeout=TIMEOUT,
-        )
-    except requests.RequestException as exc:
-        raise SaucepanError(f"network error talking to Saucepan: {exc}") from exc
-    data: Any = None
-    try:
-        data = response.json()
-    except ValueError:
-        data = None
-    return response.ok, response.status_code, data
+    # Single attempt: create-chat / generate are non-idempotent.
+    return _request_json("POST", path, with_auth=with_auth, json_body=body, attempts=1)
 
 
 def parse_companion_id(url: str) -> str | None:
@@ -316,10 +353,22 @@ def _companion_creator(companion: dict[str, Any]) -> tuple[str, str]:
 # Lorebooks
 # --------------------------------------------------------------------------- #
 
-# Saucepan flattens each lorebook entry into markdown carrying its trigger keys
-# and a comment, e.g.:  **Activation Keys:** foo, bar  /  **Secondary Keys:** …
+# Saucepan flattens each lorebook entry into markdown that opens with a metadata
+# block carrying the trigger keys and a summary, then the real lore, e.g.:
+#   # Foreplay Performance Guide
+#   **Activation Keys:** foreplay
+#   **Secondary Keys:** kiss, touch
+#   **Comment:** Comprehensive guide for extended foreplay...
+#   **Guidance:** <the actual lore>...
+# We lift the keys/comment out of that block and drop those metadata lines from
+# the injected content (they are redundant once parsed into real fields).
 _LORE_ACTIVATION_RE = re.compile(r"\*\*\s*Activation Keys?\s*:\*\*\s*(.+)", re.I)
 _LORE_SECONDARY_RE = re.compile(r"\*\*\s*Secondary Keys?\s*:\*\*\s*(.+)", re.I)
+_LORE_COMMENT_RE = re.compile(r"\*\*\s*Comment\s*:\*\*\s*(.+)", re.I)
+# A whole metadata line (incl. its trailing newline) to remove from content.
+_LORE_MARKER_LINE_RE = re.compile(
+    r"(?im)^[ \t]*\*\*\s*(?:Activation Keys?|Secondary Keys?|Comment)\s*:\*\*[^\n]*\n?"
+)
 
 
 def _split_keys(value: str) -> list[str]:
@@ -340,7 +389,10 @@ def _lorebook_world_info(entries: list[Any]) -> dict[str, dict[str, Any]]:
     """Turn a Saucepan lorebook's ``[{title, text}]`` into worldInfo entries.
 
     Shaped like JanitorAI's public-lorebook ``worldInfo.entries`` so the existing
-    ``helpers.build_character_book`` embeds them with real trigger keys.
+    ``helpers.build_character_book`` embeds them with real trigger keys. The
+    ``**Activation/Secondary Keys**`` and ``**Comment**`` metadata lines are
+    lifted into ``key``/``keysecondary``/``comment`` and stripped from the
+    injected content so the lore text stays clean.
     """
     world: dict[str, dict[str, Any]] = {}
     uid = 0
@@ -352,15 +404,21 @@ def _lorebook_world_info(entries: list[Any]) -> dict[str, dict[str, Any]]:
             continue
         activation = _LORE_ACTIVATION_RE.search(text)
         secondary = _LORE_SECONDARY_RE.search(text)
+        comment_match = _LORE_COMMENT_RE.search(text)
         keys = _split_keys(activation.group(1)) if activation else []
         secondary_keys = _split_keys(secondary.group(1)) if secondary else []
+        comment = (comment_match.group(1).strip() if comment_match else "") or str(
+            entry.get("title") or ""
+        ).strip()
+        # Drop the metadata lines from the content (keys/comment now live in
+        # their own fields); keep the heading and the actual lore.
+        body = _clean_lore_text(_LORE_MARKER_LINE_RE.sub("", text))
         world[str(uid)] = {
             "uid": uid,
-            # Keep the full (de-<br>'d) markdown as content - lossless.
-            "content": _clean_lore_text(text),
+            "content": body or _clean_lore_text(text),
             "key": keys,
             "keysecondary": secondary_keys,
-            "comment": str(entry.get("title") or "").strip(),
+            "comment": comment,
             # Keyed entries fire selectively; keyless ones stay always-on.
             "constant": not keys,
             "disable": False,
@@ -833,6 +891,7 @@ def extract_companion(
 
     leak_chars = 0
     leak_error = ""
+    leak_raw = ""
     if leak:
         try:
             leaked = leak_definition(
@@ -843,7 +902,8 @@ def extract_companion(
                 timeout=leak_timeout,
             )
             _apply_leak(character, leaked)
-            leak_chars = len(_strip_code_fence(leaked))
+            leak_raw = _strip_code_fence(leaked)
+            leak_chars = len(leak_raw)
         except SaucepanError as exc:
             # Non-fatal: keep the public-data card; report why the leak failed.
             leak_error = str(exc)
@@ -859,6 +919,9 @@ def extract_companion(
         "publicLorebooks": public_lorebooks,
         "entries": [],
         "lorebookText": "",
+        # Raw leaked dump (if any) — the CLI writes it to a sidecar for review,
+        # since the parsed merge into the card is lossy.
+        "leakRaw": leak_raw,
         "diagnostics": {
             "greetings": len(greetings),
             "sections": sorted(sections.keys()),
