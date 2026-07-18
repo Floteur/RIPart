@@ -25,5 +25,17 @@ output/
 # Saucepan bearer token (secret; never commit or share).
 .saucepan-token
 
+# Multi-account credential database for leak_bench (handles/passwords/tokens).
+# The *.example.json template is safe to commit; a real accounts file is not.
+accounts.json
+scripts/accounts.json
+*.accounts.json
+
+# Local environment / credentials (never commit).
+.env
+
+# Windows "mark of the web" metadata junk.
+*:Zone.Identifier
+
 # Local, machine-specific Claude Code settings.
 .claude/settings.local.json

@@ -94,9 +94,9 @@ def import_session(
     session_path: Path | str,
     *,
     refresh_wait: int = 3,
-    check_timeout: int = 20,
+    check_timeout: int = 0,  # matches the `rip import-session` CLI default
     bypass_cloudflare: bool = False,
-    verbose: bool = False,
+    verbose: int = 0,
     headless: bool = True,
 ) -> dict[str, Any]:
     """Import a JanitorAI session exported from your browser (cookies + storage).
@@ -142,7 +142,7 @@ def extract(
     trigger_settle_ms: int = 0,
     multi_trigger: bool = True,
     jllm_leak: bool = False,
-    verbose: bool = False,
+    verbose: int = 0,
     headless: bool = True,
     # Saucepan-only options (used when ``url`` is a saucepan.ai companion URL):
     include_lorebooks: bool = True,
@@ -169,20 +169,30 @@ def extract(
     the card is written to ``<output_dir>/library/<uuid>.png`` (a self-contained
     V3 card + embedded lorebook) and the path is added under ``result["savedPath"]``.
     Set ``save=False`` to get the data without touching disk.
+
+    ``verbose`` is a level, not just on/off: 1 prints progress diagnostics
+    (routed through ``log`` for Saucepan URLs), 2 adds wire-level HTTP/generateAlpha
+    summaries, 3 adds truncated raw request/response payload previews — useful
+    for digging into a failure. Levels 2/3 print directly (they are not routed
+    through ``log``).
     """
     if saucepan.is_saucepan_url(url):
-        result = saucepan.extract_companion(
-            url,
-            include_lorebooks=include_lorebooks,
-            leak=leak,
-            leak_config=leak_config,
-            leak_model=leak_model,
-            leak_mode=leak_mode,
-            leak_prompt=leak_prompt,
-            leak_keep=leak_keep,
-            leak_timeout=leak_timeout,
-            log=log or (lambda _message: None),
-        )
+        saucepan.set_trace_level(verbose)
+        try:
+            result = saucepan.extract_companion(
+                url,
+                include_lorebooks=include_lorebooks,
+                leak=leak,
+                leak_config=leak_config,
+                leak_model=leak_model,
+                leak_mode=leak_mode,
+                leak_prompt=leak_prompt,
+                leak_keep=leak_keep,
+                leak_timeout=leak_timeout,
+                log=log or (lambda _message: None),
+            )
+        finally:
+            saucepan.set_trace_level(0)
     else:
         result = extract_task(
             {
@@ -215,7 +225,7 @@ def recent(
     multi_trigger: bool = True,
     delete_chat_on_error: bool = False,
     jllm_leak: bool = False,
-    verbose: bool = False,
+    verbose: int = 0,
     headless: bool = True,
 ) -> dict[str, Any]:
     """List the most-recent characters, optionally ripping each into the library.

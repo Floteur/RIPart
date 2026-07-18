@@ -8,7 +8,10 @@ dependencies = [
     "botasaurus>=4.0.97",
     "botasaurus-driver>=4.0.92",
     "rich-click>=1.9.8",
-    "pillow>=10.0.0",
+    "pillow>=10.4.0",
+    # Saucepan REST client (pooled, retrying); brotli lets httpx decode `br`.
+    "httpx>=0.27",
+    "brotli>=1.1.0",
 ]
 
 [project.optional-dependencies]

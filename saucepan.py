@@ -25,12 +25,15 @@ import base64
 import json
 import os
 import re
+import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-import requests
+import httpx
 
 SAUCEPAN_BASE = "https://saucepan.ai"
 SAUCEPAN_ORIGIN = "https://saucepan.ai"
@@ -52,10 +55,67 @@ class SaucepanError(Exception):
 
 
 # --------------------------------------------------------------------------- #
+# Shared HTTP client (connection pooling + keep-alive)
+# --------------------------------------------------------------------------- #
+
+# One process-wide pooled client instead of a fresh TCP+TLS handshake per call.
+# ``httpx.Client`` is thread-safe, so the multi-account leak bench can drive it
+# from several worker threads concurrently (each carries its own bearer token via
+# ``use_token`` / per-request headers, not client state).
+_client: httpx.Client | None = None
+_client_lock = threading.Lock()
+
+
+def _get_client() -> httpx.Client:
+    global _client
+    if _client is None:
+        with _client_lock:
+            if _client is None:
+                _client = httpx.Client(
+                    base_url=SAUCEPAN_BASE,
+                    timeout=TIMEOUT,
+                    # requests followed redirects by default; httpx does not.
+                    follow_redirects=True,
+                    limits=httpx.Limits(
+                        max_connections=20, max_keepalive_connections=10
+                    ),
+                )
+    return _client
+
+
+# --------------------------------------------------------------------------- #
 # Persisted bearer token
 # --------------------------------------------------------------------------- #
 
 _token = ""
+
+# Per-thread token override. When set (via ``use_token``), it takes precedence
+# over the persisted global token for the current thread only, so several
+# accounts can drive Saucepan concurrently from one process — each worker
+# thread carries its own bearer token. Unset on the main thread → the global
+# ``_token`` / ``TOKEN_FILE`` path is used exactly as before.
+_token_override = threading.local()
+
+
+def _active_token() -> str:
+    """The bearer token for the calling thread: its override, else the global."""
+    override = getattr(_token_override, "value", None)
+    return override if override else load_token()
+
+
+@contextmanager
+def use_token(token: str):
+    """Run a block with ``token`` as the active bearer for this thread only.
+
+    Nesting is supported (the previous value is restored on exit). Passing a
+    falsy token falls back to the global token for the duration of the block.
+    """
+    prev = getattr(_token_override, "value", None)
+    _token_override.value = str(token or "").strip()
+    try:
+        yield
+    finally:
+        _token_override.value = prev
 
 
 def load_token() -> str:
@@ -96,19 +156,18 @@ def has_token() -> bool:
     return bool(load_token())
 
 
-def token_expiry() -> int | None:
-    """Read the ``exp`` (unix seconds) from the stored JWT, without verifying it.
+def token_expiry(token: str | None = None) -> int | None:
+    """Read the ``exp`` (unix seconds) from a JWT, without verifying it.
 
     Saucepan issues a JWT whose payload carries ``exp``; decoding it lets
     ``rip saucepan status`` report whether the token has actually expired rather
-    than merely whether one is present. Returns None if there is no token or it
-    is not a decodable JWT.
+    than merely whether one is present. Defaults to the stored token; pass an
+    explicit ``token`` to inspect a specific one (e.g. a cached account token).
+    Returns None if there is no token or it is not a decodable JWT.
     """
-    token = load_token()
+    token = token if token is not None else load_token()
     if not token or token.count(".") < 2:
         return None
-    import json
-
     payload = token.split(".")[1]
     payload += "=" * (-len(payload) % 4)  # restore base64url padding
     try:
@@ -123,15 +182,17 @@ def _headers(with_auth: bool = False, referer: str | None = None) -> dict[str, s
     headers = {
         "User-Agent": SAUCEPAN_UA,
         "Accept": "*/*",
-        # requests auto-decompresses gzip/deflate/br (brotli is installed); we
+        # httpx auto-decompresses gzip/deflate/br (the brotli dep is declared); we
         # never negotiate zstd so there is nothing left to hand-decode.
         "Accept-Encoding": "gzip, deflate, br",
         "Origin": SAUCEPAN_ORIGIN,
         "Referer": referer or f"{SAUCEPAN_ORIGIN}/",
         "x-saucepan-client-version": "1",
     }
-    if with_auth and load_token():
-        headers["Authorization"] = f"Bearer {_token}"
+    if with_auth:
+        token = _active_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
@@ -186,6 +247,53 @@ def assemble_fragments(content: dict[str, Any] | None) -> str:
 
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF = 0.75  # seconds; exponential (0.75s, 1.5s, ...)
+# Transient statuses worth retrying: rate-limit + the standard 5xx family.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+# --------------------------------------------------------------------------- #
+# HTTP wire tracing (deep --verbose levels): opt-in, process-wide debug knob
+# --------------------------------------------------------------------------- #
+
+# 0 = off (default). 2 = one line per request (method, path, status, timing).
+# 3 = also a truncated preview of the request/response JSON body. Mirrors the
+# CLI's -vv/-vvv. A plain global (not per-thread) is fine here: it is a debug
+# toggle set once per run, not auth state, so interleaved output from the
+# multi-account leak bench is an acceptable trade for staying simple.
+_trace_level = 0
+
+
+def set_trace_level(level: int) -> None:
+    """Enable Saucepan HTTP wire tracing at ``level`` (0 disables it).
+
+    Never logs the ``Authorization`` header or a sign-in password: login goes
+    through :func:`authenticate`, which posts credentials directly and never
+    passes through :func:`_request_json`.
+    """
+    global _trace_level
+    _trace_level = int(level)
+
+
+def _trace_preview(value: Any, limit: int = 800) -> str:
+    """One-line, length-capped rendering of a request/response body for tracing."""
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[:limit]}… ({len(text)} chars total)"
+
+
+def _retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Seconds to wait before retrying: honor a numeric ``Retry-After``, else backoff.
+
+    ``Retry-After`` may also be an HTTP-date, which we don't parse here; that rare
+    form falls back to the exponential backoff.
+    """
+    retry_after = response.headers.get("Retry-After")
+    if retry_after:
+        try:
+            return max(0.0, float(retry_after))
+        except ValueError:
+            pass
+    return _RETRY_BACKOFF * (2**attempt)
 
 
 def _request_json(
@@ -200,34 +308,49 @@ def _request_json(
     """One HTTP round trip returning ``(ok, status, parsed_json_or_None)``.
 
     Retries up to ``attempts`` times with exponential backoff on network errors
-    and (when ``retry_5xx``) transient 5xx responses. Only GETs retry — POSTs
-    here create chats / generations and must not be silently repeated.
+    and (when ``retry_5xx``) transient 429/5xx responses, honoring a numeric
+    ``Retry-After`` header when present. Only GETs retry — POSTs here create
+    chats / generations and must not be silently repeated.
     """
-    url = f"{SAUCEPAN_BASE}{path}"
     headers = _headers(with_auth)
     if json_body is not None:
         headers = {**headers, "Content-Type": "application/json"}
 
+    client = _get_client()
     for attempt in range(max(1, attempts)):
         last = attempt == attempts - 1
+        started = time.monotonic()
         try:
-            response = requests.request(
-                method, url, headers=headers, json=json_body, timeout=TIMEOUT
-            )
-        except requests.RequestException as exc:
+            response = client.request(method, path, headers=headers, json=json_body)
+        except httpx.HTTPError as exc:
+            if _trace_level >= 2:
+                print(f"[saucepan-http] {method} {path} -> network error: {exc}", flush=True)
             if last:
                 raise SaucepanError(f"network error talking to Saucepan: {exc}") from exc
             time.sleep(_RETRY_BACKOFF * (2**attempt))
             continue
-        if retry_5xx and response.status_code >= 500 and not last:
-            time.sleep(_RETRY_BACKOFF * (2**attempt))
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if _trace_level >= 2:
+            retried = f" (attempt {attempt + 1})" if attempt else ""
+            print(
+                f"[saucepan-http] {method} {path} -> {response.status_code} "
+                f"({elapsed_ms:.0f}ms){retried}",
+                flush=True,
+            )
+        if _trace_level >= 3:
+            if json_body is not None:
+                print(f"[saucepan-http]   body: {_trace_preview(json_body)}", flush=True)
+            print(f"[saucepan-http]   resp: {_trace_preview(response.text)}", flush=True)
+        if retry_5xx and response.status_code in _RETRYABLE_STATUS and not last:
+            time.sleep(_retry_delay(response, attempt))
             continue
         data: Any = None
         try:
             data = response.json()
         except ValueError:
             data = None
-        return response.ok, response.status_code, data
+        # ``not is_error`` mirrors requests' ``.ok`` (status < 400).
+        return not response.is_error, response.status_code, data
     raise SaucepanError("request failed")  # pragma: no cover - loop always returns/raises
 
 
@@ -260,11 +383,16 @@ def is_saucepan_url(url: str) -> bool:
     return "saucepan.ai" in (url or "").lower()
 
 
-def login(username: str, password: str) -> str:
-    """Log in with username + password; store and return the bearer token."""
+def authenticate(username: str, password: str) -> str:
+    """Log in with username + password and return the bearer token.
+
+    Unlike ``login``, this does *not* persist the token to disk or the global
+    ``_token`` — the caller decides what to do with it. Used by multi-account
+    tooling that juggles several tokens at once (see ``use_token``).
+    """
     try:
-        response = requests.post(
-            f"{SAUCEPAN_BASE}/api/v1/auth/sign_in_password",
+        response = _get_client().post(
+            "/api/v1/auth/sign_in_password",
             headers={
                 **_headers(with_auth=False, referer=f"{SAUCEPAN_ORIGIN}/sign-in"),
                 "Content-Type": "application/json",
@@ -274,16 +402,15 @@ def login(username: str, password: str) -> str:
                 "handle": str(username or "").strip(),
                 "password": str(password or ""),
             },
-            timeout=TIMEOUT,
         )
-    except requests.RequestException as exc:
+    except httpx.HTTPError as exc:
         raise SaucepanError(f"network error talking to Saucepan: {exc}") from exc
 
     try:
         data = response.json()
     except ValueError:
         data = {}
-    if not response.ok:
+    if response.is_error:
         message = (
             (data.get("error") or {}).get("message") if isinstance(data, dict) else None
         )
@@ -301,6 +428,12 @@ def login(username: str, password: str) -> str:
         )
     if not token:
         raise SaucepanError("login succeeded but no token was returned")
+    return token
+
+
+def login(username: str, password: str) -> str:
+    """Log in with username + password; store and return the bearer token."""
+    token = authenticate(username, password)
     set_token(token)
     return token
 
@@ -310,16 +443,15 @@ def fetch_avatar(image_id: str | None) -> str:
     if not image_id:
         return ""
     try:
-        response = requests.get(
-            f"{SAUCEPAN_BASE}/cdn/{requests.utils.quote(str(image_id), safe='')}/card",
+        response = _get_client().get(
+            f"/cdn/{quote(str(image_id), safe='')}/card",
             headers={
                 "User-Agent": SAUCEPAN_UA,
                 "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
                 "Referer": f"{SAUCEPAN_ORIGIN}/",
             },
-            timeout=TIMEOUT,
         )
-        if not response.ok:
+        if response.is_error:
             return ""
         content = response.content
         if len(content) > MAX_IMAGE_BYTES:
@@ -327,7 +459,7 @@ def fetch_avatar(image_id: str | None) -> str:
         content_type = response.headers.get("content-type") or "image/jpeg"
         encoded = base64.b64encode(content).decode("ascii")
         return f"data:{content_type};base64,{encoded}"
-    except requests.RequestException:
+    except httpx.HTTPError:
         return ""
 
 
@@ -436,7 +568,7 @@ def _fetch_chapter_fragments(lorebook_id: str) -> list[dict[str, Any]]:
     readable; when it is not hydrated, ``/v2/lorebooks/{id}/chapters`` still
     carries the (obfuscated) ``text_fragments`` per chapter.
     """
-    lid = requests.utils.quote(str(lorebook_id), safe="")
+    lid = quote(str(lorebook_id), safe="")
     ok, _status, data = _get_json(f"/api/v2/lorebooks/{lid}/chapters", True)
     if not ok or not isinstance(data, dict):
         return []
@@ -462,7 +594,7 @@ def _fetch_chapter_fragments(lorebook_id: str) -> list[dict[str, Any]]:
 def fetch_lorebook(lorebook_id: str) -> dict[str, Any] | None:
     """Fetch one lorebook as a ``{title, worldInfo}`` book (or None on failure)."""
     ok, _status, data = _get_json(
-        f"/api/v1/lorebooks/{requests.utils.quote(str(lorebook_id), safe='')}", True
+        f"/api/v1/lorebooks/{quote(str(lorebook_id), safe='')}", True
     )
     name = ""
     chapters: list[Any] = []
@@ -482,7 +614,7 @@ def fetch_lorebook(lorebook_id: str) -> dict[str, Any] | None:
 def fetch_companion_lorebooks(companion_id: str) -> list[dict[str, Any]]:
     """Fetch every lorebook attached to a companion (best effort; skips failures)."""
     ok, _status, data = _get_json(
-        f"/api/v2/companions/{requests.utils.quote(str(companion_id), safe='')}/lorebooks",
+        f"/api/v2/companions/{quote(str(companion_id), safe='')}/lorebooks",
         True,
     )
     if not ok or not isinstance(data, dict):
@@ -586,7 +718,7 @@ def update_provider_config(config_id: str, **fields: Any) -> dict[str, Any]:
     body.update({k: v for k, v in fields.items() if k in body})
     ok, status, _data = _request_json(
         "PATCH",
-        f"/api/v1/openai_provider/config/{requests.utils.quote(str(config_id), safe='')}",
+        f"/api/v1/openai_provider/config/{quote(str(config_id), safe='')}",
         with_auth=True,
         json_body=body,
         attempts=1,
@@ -617,7 +749,7 @@ def archive_chat(chat_id: str) -> None:
     """Archive a chat (used to tidy up the throwaway leak chat). Best effort."""
     try:
         _post_json(
-            f"/api/v1/chats/{requests.utils.quote(str(chat_id), safe='')}/archive",
+            f"/api/v1/chats/{quote(str(chat_id), safe='')}/archive",
             {},
             True,
         )
@@ -673,7 +805,7 @@ def _run_generation(
     polls = 0
     while time.monotonic() < deadline:
         _pok, _pstatus, poll = _get_json(
-            f"/api/v2/chat/generation/{requests.utils.quote(str(generation_id), safe='')}/poll",
+            f"/api/v2/chat/generation/{quote(str(generation_id), safe='')}/poll",
             True,
         )
         poll = poll if isinstance(poll, dict) else {}
@@ -926,11 +1058,11 @@ def extract_companion(
         raise SaucepanError("not a Saucepan companion URL", 400)
 
     def_ok, def_status, def_data = _get_json(
-        f"/api/v1/companion/definition?companion_id={requests.utils.quote(companion_id, safe='')}",
+        f"/api/v1/companion/definition?companion_id={quote(companion_id, safe='')}",
         True,
     )
     comp_ok, comp_status, comp_data = _get_json(
-        f"/api/v2/companions/{requests.utils.quote(companion_id, safe='')}", True
+        f"/api/v2/companions/{quote(companion_id, safe='')}", True
     )
 
     companion = comp_data.get("companion") if isinstance(comp_data, dict) else None

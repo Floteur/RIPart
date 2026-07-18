@@ -109,6 +109,24 @@ def headed_option(func):
     )(func)
 
 
+def verbose_option(func):
+    """Add the shared repeatable ``-v``/``--verbose`` flag to a command.
+
+    Stacks like a normal CLI verbosity flag: ``-v`` = progress diagnostics
+    (chat/persona/trigger-pass narration, the classic --verbose), ``-vv`` = also
+    one line per HTTP/generateAlpha call (status + timing), ``-vvv`` = also a
+    truncated preview of each request/response payload — for digging all the
+    way down into a bug.
+    """
+    return click.option(
+        "-v",
+        "--verbose",
+        count=True,
+        help="Repeatable: -v progress, -vv +wire-level call summaries, "
+        "-vvv +raw request/response payload previews.",
+    )(func)
+
+
 def browser_kwargs(headed: bool) -> dict[str, bool]:
     return {"headless": not headed, "enable_xvfb_virtual_display": False}
 
@@ -250,19 +268,14 @@ def login(timeout: int, headless: bool) -> None:
     default=False,
     help="Try Botasaurus' Cloudflare-bypass helper if a challenge blocks the import.",
 )
-@click.option(
-    "--verbose",
-    is_flag=True,
-    default=False,
-    help="Print non-secret import diagnostics.",
-)
+@verbose_option
 @headed_option
 def import_session(
     path: Path,
     refresh_wait: int,
     check_timeout: int,
     bypass_cloudflare: bool,
-    verbose: bool,
+    verbose: int,
     headed: bool,
 ) -> None:
     """Import a local cookie / localStorage dump into the profile.
@@ -459,12 +472,7 @@ def inspect(url: str, headed: bool) -> None:
     help="For allow_proxy=false characters: reconstruct the definition via a "
     "JanitorLLM injection leak (lossy; marked reconstructed-jllm).",
 )
-@click.option(
-    "--verbose",
-    is_flag=True,
-    default=False,
-    help="Print non-secret extraction diagnostics.",
-)
+@verbose_option
 @headed_option
 def extract(
     url: str,
@@ -474,7 +482,7 @@ def extract(
     trigger_settle_ms: int,
     no_multi_trigger: bool,
     jllm_leak: bool,
-    verbose: bool,
+    verbose: int,
     headed: bool,
 ) -> None:
     """Rip a character's private card + lorebook via generateAlpha.
@@ -488,7 +496,7 @@ def extract(
     through Saucepan's API (no browser); see [bold]rip saucepan[/].
     """
     if sp.is_saucepan_url(url):
-        _saucepan_extract(url)
+        _saucepan_extract(url, verbose=verbose)
         return
 
     started = time.monotonic()
@@ -606,9 +614,7 @@ def _print_extract_diagnostics(diagnostics: dict) -> None:
     help="[--extract] Also rip allow_proxy=false cards by reconstructing their "
     "definition via a JanitorLLM injection leak (phase 2; lossy).",
 )
-@click.option(
-    "--verbose", is_flag=True, default=False, help="Print progress diagnostics."
-)
+@verbose_option
 @headed_option
 def recent(
     limit: int,
@@ -620,7 +626,7 @@ def recent(
     no_multi_trigger: bool,
     delete_chat_on_error: bool,
     jllm_leak: bool,
-    verbose: bool,
+    verbose: int,
     headed: bool,
 ) -> None:
     """List the most-recent characters (newest first), optionally ripping them.
@@ -901,13 +907,7 @@ def saucepan_providers() -> None:
     help="[--leak] Accept the model's reply even if it doesn't look like a definition "
     "dump (by default such replies are retried, since models often just keep roleplaying).",
 )
-@click.option(
-    "--verbose",
-    is_flag=True,
-    default=False,
-    help="Print diagnostics (definition/lorebook counts, and every leak step: model, "
-    "poll status, context breakdown, reply preview).",
-)
+@verbose_option
 def saucepan_extract(
     url: str,
     no_lorebooks: bool,
@@ -918,7 +918,7 @@ def saucepan_extract(
     leak_prompt: str | None,
     leak_system: str | None,
     leak_keep: bool,
-    verbose: bool,
+    verbose: int,
 ) -> None:
     """Rip a Saucepan companion card + lorebooks by URL (or bare companion id)."""
     _saucepan_extract(
@@ -959,10 +959,11 @@ def _saucepan_extract(
     leak_prompt: str | None = None,
     leak_system: str | None = None,
     leak_keep: bool = False,
-    verbose: bool = False,
+    verbose: int = 0,
 ) -> None:
     """Shared implementation for [rip saucepan extract] and [rip extract <sp url>]."""
-    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose else (lambda m: None)
+    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
+    sp.set_trace_level(verbose)
     if leak and leak_config and leak_model:
         console.print(
             "[yellow]![/] both --leak-config and --leak-model given; using --leak-config"
@@ -1024,6 +1025,7 @@ def _saucepan_extract(
             err_console.print("[dim]run [bold]rip saucepan login[/] to authenticate[/]")
         raise SystemExit(1)
     finally:
+        sp.set_trace_level(0)
         if restore is not None:
             try:
                 sp.set_provider_prompt(restore[0], restore[1])

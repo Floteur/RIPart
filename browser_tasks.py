@@ -408,31 +408,28 @@ def _iso_from_epoch(value: Any) -> str | None:
     )
 
 
-def _jwt_exp_from_token(token: str) -> int | None:
-    parts = token.split(".")
-    if len(parts) != 3:
-        return None
-    payload = parts[1] + "=" * (-len(parts[1]) % 4)
-    try:
-        decoded = urlsafe_b64decode(payload.encode("ascii"))
-        data = json.loads(decoded.decode("utf-8"))
-    except Exception:
-        return None
-    exp = data.get("exp")
-    return int(exp) if isinstance(exp, (int, float)) else None
-
-
-def _safe_b64_json(raw: str) -> dict[str, Any] | None:
-    value = raw
-    if value.startswith("base64-"):
-        value = value[7:]
-    value += "=" * (-len(value) % 4)
+def _b64url_json(value: str) -> dict[str, Any] | None:
+    """Decode a base64url segment (padding optional) into a JSON object, or None."""
+    value += "=" * (-len(value) % 4)  # restore base64url padding
     try:
         decoded = urlsafe_b64decode(value.encode("ascii"))
         data = json.loads(decoded.decode("utf-8"))
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _jwt_exp_from_token(token: str) -> int | None:
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    data = _b64url_json(parts[1])
+    exp = data.get("exp") if data else None
+    return int(exp) if isinstance(exp, (int, float)) else None
+
+
+def _safe_b64_json(raw: str) -> dict[str, Any] | None:
+    return _b64url_json(raw[7:] if raw.startswith("base64-") else raw)
 
 
 def _session_diagnostics(cookies: list[Any]) -> dict[str, Any]:
@@ -576,30 +573,29 @@ def _fetch_json(driver, url: str, init: dict[str, Any] | None = None) -> Any:
     return json.loads(result["body"])
 
 
+# Page-side snippet (an async IIFE *expression*): fetch ``args`` and resolve it to
+# a ``data:`` URL, or '' on any failure. Shared by the blocking and background
+# avatar downloaders below so the fetch→blob→readAsDataURL logic lives in one place.
+_AVATAR_FETCH_JS = """(async () => {
+  try {
+    const r = await fetch(args);
+    if (!r.ok) return '';
+    const blob = await r.blob();
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) { return ''; }
+})()"""
+
+
 def _download_avatar(driver, url: str) -> str:
     if not url:
         return ""
     try:
-        return (
-            driver.run_js(
-                """
-            return (async () => {
-              const u = args;
-              const r = await fetch(u);
-              if (!r.ok) return '';
-              const blob = await r.blob();
-              return await new Promise((resolve, reject) => {
-                const reader = new FileReader();
-                reader.onloadend = () => resolve(reader.result);
-                reader.onerror = reject;
-                reader.readAsDataURL(blob);
-              });
-            })();
-            """,
-                url,
-            )
-            or ""
-        )
+        return driver.run_js(f"return {_AVATAR_FETCH_JS};", url) or ""
     except Exception:
         return ""
 
@@ -615,26 +611,7 @@ def _start_avatar_download(driver, url: str) -> bool:
     if not url:
         return False
     try:
-        driver.run_js(
-            """
-            const u = args;
-            window.__ripAvatarPromise = (async () => {
-              try {
-                const r = await fetch(u);
-                if (!r.ok) return '';
-                const blob = await r.blob();
-                return await new Promise((resolve, reject) => {
-                  const reader = new FileReader();
-                  reader.onloadend = () => resolve(reader.result);
-                  reader.onerror = reject;
-                  reader.readAsDataURL(blob);
-                });
-              } catch (e) { return ''; }
-            })();
-            return true;
-            """,
-            url,
-        )
+        driver.run_js(f"window.__ripAvatarPromise = {_AVATAR_FETCH_JS};\nreturn true;", url)
         return True
     except Exception:
         return False
@@ -770,8 +747,24 @@ def _delete_chat(driver, chat_id: str) -> bool:
     return result["status"] < 400
 
 
-def _extract_log(message: str, *, verbose: bool = False) -> None:
-    print(f"[extract] {message}", flush=True)
+def _extract_log(message: str, *, verbose: int = 0, level: int = 1) -> None:
+    """Print ``message`` when the run's ``-v`` count meets ``level``.
+
+    Levels: 1 = progress (chat/persona/trigger-pass narration; the classic
+    ``--verbose``), 2 = wire summaries (one line per generateAlpha call: status
+    + timing), 3 = raw payload previews (truncated request/response bodies).
+    Every call site threads ``verbose`` through, so a plain ``rip extract``
+    (verbose=0) stays quiet.
+    """
+    if verbose >= level:
+        print(f"[extract] {message}", flush=True)
+
+
+def _trace_preview(value: Any, limit: int = 800) -> str:
+    """One-line, length-capped rendering of a JS payload for -vvv tracing."""
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else f"{text[:limit]}… ({len(text)} chars total)"
 
 
 def _get_profile(driver) -> dict[str, Any]:
@@ -797,8 +790,34 @@ def _patch_profile_config(driver, config: dict[str, Any]) -> None:
         )
 
 
+def _apply_proxy_extraction(config: dict[str, Any]) -> Any:
+    """Point a profile ``config`` at the dummy proxy for extraction (in place).
+
+    Appends the dummy proxy preset (if absent), selects it, switches to proxy
+    mode, and zeroes the context length. Returns the previous
+    ``generation_settings.context_length`` (for logging).
+    """
+    presets = list(config.get("proxyConfigurations") or [])
+    if not any(
+        isinstance(preset, dict) and preset.get("id") == DUMMY_PROXY_ID
+        for preset in presets
+    ):
+        presets.append(dict(DUMMY_PRESET))
+    config["proxyConfigurations"] = presets
+    config["selectedProxyConfigId"] = DUMMY_PROXY_ID
+    config["api"] = "openai"
+    config["open_ai_mode"] = "proxy"
+    config["open_ai_reverse_proxy"] = DUMMY_PRESET["apiUrl"]
+    config["openAiModel"] = DUMMY_PRESET["model"]
+    generation_settings = dict(config.get("generation_settings") or {})
+    prev_ctx = generation_settings.get("context_length")
+    generation_settings["context_length"] = 0
+    config["generation_settings"] = generation_settings
+    return prev_ctx
+
+
 def _enter_extraction_mode(
-    driver, profile: dict[str, Any] | None = None, *, verbose: bool = False
+    driver, profile: dict[str, Any] | None = None, *, verbose: int = 0
 ) -> dict[str, Any]:
     if profile is None:
         profile = _get_profile(driver)
@@ -806,22 +825,7 @@ def _enter_extraction_mode(
     if not isinstance(original, dict):
         raise RuntimeError("profile has no config to modify")
     next_config = json.loads(json.dumps(original))
-    presets = list(next_config.get("proxyConfigurations") or [])
-    if not any(
-        isinstance(preset, dict) and preset.get("id") == DUMMY_PROXY_ID
-        for preset in presets
-    ):
-        presets.append(dict(DUMMY_PRESET))
-    next_config["proxyConfigurations"] = presets
-    next_config["selectedProxyConfigId"] = DUMMY_PROXY_ID
-    next_config["api"] = "openai"
-    next_config["open_ai_mode"] = "proxy"
-    next_config["open_ai_reverse_proxy"] = DUMMY_PRESET["apiUrl"]
-    next_config["openAiModel"] = DUMMY_PRESET["model"]
-    generation_settings = dict(next_config.get("generation_settings") or {})
-    prev_ctx = generation_settings.get("context_length")
-    generation_settings["context_length"] = 0
-    next_config["generation_settings"] = generation_settings
+    prev_ctx = _apply_proxy_extraction(next_config)
     _patch_profile_config(driver, next_config)
     _extract_log(
         f"extraction mode on (context_length {prev_ctx} -> 0, dummy proxy selected)",
@@ -831,7 +835,7 @@ def _enter_extraction_mode(
 
 
 def _restore_profile(
-    driver, original: dict[str, Any] | None, *, verbose: bool = False
+    driver, original: dict[str, Any] | None, *, verbose: int = 0
 ) -> None:
     if not original:
         return
@@ -882,7 +886,7 @@ def _create_persona(driver, name: str) -> dict[str, Any]:
     return json.loads(result["body"])
 
 
-def _ensure_user_macro_persona(driver, *, verbose: bool = False) -> dict[str, Any]:
+def _ensure_user_macro_persona(driver, *, verbose: int = 0) -> dict[str, Any]:
     existing: list[dict[str, Any]] = []
     try:
         existing = _list_personas(driver)
@@ -980,21 +984,7 @@ def _synth_bot_message(
 
 def _extraction_user_config(config: dict[str, Any]) -> dict[str, Any]:
     user_config = json.loads(json.dumps(config))
-    presets = list(user_config.get("proxyConfigurations") or [])
-    if not any(
-        isinstance(preset, dict) and preset.get("id") == DUMMY_PROXY_ID
-        for preset in presets
-    ):
-        presets.append(dict(DUMMY_PRESET))
-    user_config["proxyConfigurations"] = presets
-    user_config["selectedProxyConfigId"] = DUMMY_PROXY_ID
-    user_config["api"] = "openai"
-    user_config["open_ai_mode"] = "proxy"
-    user_config["open_ai_reverse_proxy"] = DUMMY_PRESET["apiUrl"]
-    user_config["openAiModel"] = DUMMY_PRESET["model"]
-    generation_settings = dict(user_config.get("generation_settings") or {})
-    generation_settings["context_length"] = 0
-    user_config["generation_settings"] = generation_settings
+    _apply_proxy_extraction(user_config)
     return user_config
 
 
@@ -1164,7 +1154,7 @@ def import_session_task(driver, data):
             session = _normalize_session_data(json.load(fh))
     else:
         session = _normalize_session_data((data or {}).get("session"))
-    verbose = bool((data or {}).get("verbose"))
+    verbose = int((data or {}).get("verbose") or 0)
     driver.get(ORIGIN)
     params = []
     for raw_cookie in session["cookies"]:
@@ -1230,17 +1220,7 @@ def inspect_task(driver, data):
     _export_session(driver)
     meta = _fetch_json(driver, f"{ORIGIN}/hampter/characters/{character_id}")
     public_lorebooks = _fetch_public_lorebooks(driver, meta)
-    avatar = meta.get("avatar") or meta.get("profile_image") or ""
-    avatar_url = (
-        avatar
-        if avatar.startswith(("http://", "https://"))
-        else (
-            f"https://ella.janitorai.com/bot-avatars/{avatar}?width=1200"
-            if avatar
-            else ""
-        )
-    )
-    avatar_base64 = _download_avatar(driver, avatar_url)
+    avatar_base64 = _download_avatar(driver, _avatar_url(meta))
     character = build_character(meta, None, avatar_base64, "")
     return {
         "url": char_url,
@@ -1306,7 +1286,7 @@ def _janitor_leak_config(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _enter_janitor_leak_mode(
-    driver, profile: dict[str, Any], *, verbose: bool = False
+    driver, profile: dict[str, Any], *, verbose: int = 0
 ) -> dict[str, Any]:
     """Switch the profile to JanitorLLM mode; returns the original config."""
     original = profile.get("config")
@@ -1397,6 +1377,8 @@ def _leak_definition_via_janitor(
             profile, chat_id, character_id, messages, persona, user_config=user_config
         )
         pacer.wait()
+        clog(f"leak pass {attempt + 1}/{passes} request: {_trace_preview(body)}", level=3)
+        started = time.monotonic()
         result = _authed_fetch(
             driver,
             f"{ORIGIN}/generateAlpha",
@@ -1410,7 +1392,12 @@ def _leak_definition_via_janitor(
                 "body": json.dumps(body),
             },
         )
+        elapsed_ms = (time.monotonic() - started) * 1000
         status = int(result.get("status") or 0)
+        clog(
+            f"leak pass {attempt + 1}/{passes} generateAlpha -> {status} ({elapsed_ms:.0f}ms)",
+            level=2,
+        )
         if status >= 400:
             if status == 429:
                 pacer.on_rate_limit()
@@ -1418,6 +1405,7 @@ def _leak_definition_via_janitor(
             continue
         pacer.on_success()
         text = _parse_janitor_completion(result.get("body") or "")
+        clog(f"leak pass {attempt + 1}/{passes} response: {_trace_preview(result.get('body') or '')}", level=3)
         if text.strip():
             dumps.append(text)
             clog(f"leak pass {attempt + 1}/{passes}: {len(text)} chars")
@@ -1470,7 +1458,7 @@ def _extract_character(
     max_trigger_passes: int,
     settle: float,
     delete_chat_on_error: bool,
-    verbose: bool,
+    verbose: int,
     pacer: "_Pacer | None" = None,
     mode: str = "proxy",
     jllm_passes: int = JLLM_LEAK_PASSES,
@@ -1494,23 +1482,35 @@ def _extract_character(
     if pacer is None:
         pacer = _Pacer(floor=settle)
 
-    def _clog(message: str) -> None:
-        _extract_log(f"[{character_id}] {message}", verbose=verbose)
+    def _clog(message: str, *, level: int = 1) -> None:
+        _extract_log(f"[{character_id}] {message}", verbose=verbose, level=level)
 
     def _generate(trigger_text: str, *, label: str) -> dict[str, Any]:
         messages = base_messages + [_synth_user_message(chat_id, trigger_text)]
         body = _build_generate_alpha_body(
             profile, chat_id, character_id, messages, persona
         )
+        if verbose >= 3:
+            _clog(f"{label} request: {_trace_preview(body)}", level=3)
         last_exc: Exception | None = None
         backoff = 2.0
         for attempt in range(GENERATE_MAX_ATTEMPTS):
             pacer.wait()  # adaptive: no-op on healthy runs, spaces calls after a 429
+            started = time.monotonic()
             try:
                 payload = _call_generate_alpha(driver, body, chat_id)
+                elapsed_ms = (time.monotonic() - started) * 1000
+                _clog(f"{label} generateAlpha ok ({elapsed_ms:.0f}ms)", level=2)
+                if verbose >= 3:
+                    _clog(f"{label} response: {_trace_preview(payload)}", level=3)
                 pacer.on_success()
                 return payload
             except GenerateAlphaError as exc:
+                elapsed_ms = (time.monotonic() - started) * 1000
+                _clog(
+                    f"{label} generateAlpha HTTP {exc.status} ({elapsed_ms:.0f}ms)",
+                    level=2,
+                )
                 last_exc = exc
                 if exc.status == 403:
                     raise  # proxies forbidden for this character - permanent, don't retry
@@ -1806,7 +1806,7 @@ def extract_task(driver, data):
     its own response, so we never touch the chat UI: no navigation, no composer
     selectors, no reloads. Each pass is a single authenticated fetch (~0.1s).
     """
-    verbose = bool(data.get("verbose"))
+    verbose = int(data.get("verbose") or 0)
     character_id = parse_character_id(data["url"])
     char_url = (
         data["url"]
@@ -1893,7 +1893,7 @@ def recent_task(driver, data):
     Extraction mode and the ``{{user}}`` persona are set up once and reused
     across every card, so ripping N cards costs one setup, not N.
     """
-    verbose = bool(data.get("verbose"))
+    verbose = int(data.get("verbose") or 0)
     limit = max(1, int(data.get("limit") or 20))
     mode = "sfw" if data.get("sfw") else "all"
 
