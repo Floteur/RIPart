@@ -412,18 +412,20 @@ print(result["savedPath"])
 ## Spicychat (spicychat.ai)
 
 spicychat (a NextDayAI / `nd-api` platform) serves a character's definition
-**directly** from its REST API — *when the creator left it public*. Unlike
-clank and Saucepan there is nothing to leak in that case: `rip spicychat extract`
-reads `persona` (the definition), `dialogue` (example messages), `scenario`, and
-the greeting straight off `GET /v2/characters/<id>` and writes a full card.
+**directly** from its REST API — *when the creator left it public*.
+`rip spicychat extract` reads `persona` (the definition), `dialogue` (example
+messages), `scenario`, and the greeting straight off `GET /v2/characters/<id>`
+and writes a full card. When the definition is gated, `--leak` recovers it via a
+model dump (see **Gated definitions** below).
 
 ```bash
-rip spicychat extract <url>       # rip a character card (no login needed)
-rip spicychat search <query>      # text-search the public catalogue
-rip spicychat list                # browse the catalogue (most active first)
-rip spicychat login               # optional: store a refresh token (prompts)
-rip spicychat status              # confirm a login (guest works regardless)
-rip spicychat logout              # forget the stored session
+rip spicychat extract <url>        # rip a character card (no login needed)
+rip spicychat extract <url> --leak # gated definition? recover it via a model dump
+rip spicychat search <query>       # text-search the public catalogue
+rip spicychat list                 # browse the catalogue (most active first)
+rip spicychat login                # optional: store a refresh token (prompts)
+rip spicychat status               # confirm a login (guest works regardless)
+rip spicychat logout               # forget the stored session
 ```
 
 `<url>` is a `spicychat.ai/chatbot/<uuid>` URL, a `.../characters/<uuid>` URL, or
@@ -438,9 +440,26 @@ gitignored `.spicychat-session.json`). That guest identity is enough to read any
 
 **Gated definitions.** When a creator hides the definition
 (`definition_visible: false`), the API returns only the greeting + public
-metadata — even for a logged-in account. RIPart saves those as a **partial** card
-marked `spicychat-partial` (`description` empty), the same shape as clank's
-partial path. A verbatim leak for gated definitions is a future addition.
+metadata — even for a logged-in account. By default RIPart saves those as a
+**partial** card marked `spicychat-partial` (`description` empty), the same shape
+as clank's partial path.
+
+Add **`--leak`** to recover a gated definition anyway: RIPart opens a throwaway
+conversation and asks the chat model — which *does* have the hidden definition in
+its context — to write out its complete character profile. The recovered text
+becomes the card `description` and the card is marked `spicychat-leak`. No login
+is needed (a guest can chat). The dump is a model **paraphrase** — close but not
+verbatim, and occasionally incomplete — because spicychat exposes no custom
+provider / echo hook for a verbatim leak. It is best-effort: if every attempt
+fails (a refusal, or the model just keeps roleplaying) the card falls back to
+partial. `--leak-model`, `--leak-attempts`, `--leak-prompt`, and `--leak-keep`
+tune the dump.
+
+```bash
+rip spicychat extract <gated-url> --leak            # recover via model dump
+rip spicychat extract <gated-url> --leak -v         # show each attempt
+rip spicychat extract <gated-url> --leak --leak-keep # accept a messy dump
+```
 
 **Browsing.** `rip spicychat search` queries the public Typesense index the web
 app uses (name / title / tags / creator). Each row shows whether the definition

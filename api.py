@@ -225,7 +225,13 @@ def extract(
         spicychat.set_trace_level(verbose)
         try:
             result = spicychat.extract_character(
-                url, log=log or (lambda _message: None)
+                url,
+                leak=leak,
+                leak_prompt=leak_prompt or spicychat.DEFAULT_LEAK_PROMPT,
+                leak_model=leak_model or "default",
+                leak_keep=leak_keep,
+                leak_timeout=leak_timeout,
+                log=log or (lambda _message: None),
             )
         finally:
             spicychat.set_trace_level(0)

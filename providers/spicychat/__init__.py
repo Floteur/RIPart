@@ -35,11 +35,13 @@ from .client import (
     use_session,
 )
 from .extract import extract_character
+from .leak import DEFAULT_LEAK_PROMPT, leak_definition
 from .read import get_character, search_characters
 
 __all__ = [
     "APP_ID",
     "CDN_BASE",
+    "DEFAULT_LEAK_PROMPT",
     "NDAPI_BASE",
     "SESSION_FILE",
     "SPICYCHAT_ORIGIN",
@@ -52,6 +54,7 @@ __all__ = [
     "get_character",
     "has_token",
     "is_spicychat_url",
+    "leak_definition",
     "load_session",
     "parse_character_id",
     "search_characters",

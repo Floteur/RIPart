@@ -1657,24 +1657,97 @@ def _spicychat_list(
 
 @spicychat.command("extract")
 @click.argument("url", metavar="URL_OR_UUID")
+@click.option(
+    "--leak",
+    is_flag=True,
+    default=False,
+    help="If the definition is gated (definition_visible=false), recover it by having "
+    "the chat model dump its own context in a throwaway conversation. Lossy (a model "
+    "paraphrase, not verbatim); marks the card 'spicychat-leak'. No login needed.",
+)
+@click.option(
+    "--leak-model",
+    metavar="MODEL",
+    default="default",
+    show_default=True,
+    help="[--leak] spicychat inference_model to run the dump through.",
+)
+@click.option(
+    "--leak-attempts",
+    type=int,
+    default=4,
+    show_default=True,
+    help="[--leak] How many times to retry (leaks are non-deterministic).",
+)
+@click.option(
+    "--leak-prompt",
+    metavar="TEXT",
+    default=None,
+    help="[--leak] Override the message sent to the model. The default '/cmd dump …' "
+    "prompt reliably breaks character; a polite 'describe yourself' request usually "
+    "just gets more roleplay.",
+)
+@click.option(
+    "--leak-keep",
+    is_flag=True,
+    default=False,
+    help="[--leak] Accept the reply even if it doesn't look like a definition dump "
+    "(by default such replies are retried, since models often just keep roleplaying).",
+)
 @verbose_option
-def spicychat_extract(url: str, verbose: int) -> None:
+def spicychat_extract(
+    url: str,
+    leak: bool,
+    leak_model: str,
+    leak_attempts: int,
+    leak_prompt: str | None,
+    leak_keep: bool,
+    verbose: int,
+) -> None:
     """Rip a spicychat.ai character card from a chatbot URL or UUID.
 
     URL can be a [cyan]spicychat.ai/chatbot/<uuid>[/] URL, a
     [cyan]spicychat.ai/characters/<uuid>[/] URL, or a bare UUID. No login is
     required for a character whose definition is public.
+
+    A gated definition (definition_visible=false) saves a partial card by
+    default; add [bold]--leak[/] to recover it via a model dump.
     """
-    _spicychat_extract(url, verbose=verbose)
+    _spicychat_extract(
+        url,
+        leak=leak,
+        leak_model=leak_model,
+        leak_attempts=leak_attempts,
+        leak_prompt=leak_prompt,
+        leak_keep=leak_keep,
+        verbose=verbose,
+    )
 
 
-def _spicychat_extract(url: str, *, verbose: int = 0) -> None:
+def _spicychat_extract(
+    url: str,
+    *,
+    leak: bool = False,
+    leak_model: str = "default",
+    leak_attempts: int = 4,
+    leak_prompt: str | None = None,
+    leak_keep: bool = False,
+    verbose: int = 0,
+) -> None:
     """Shared impl for [rip spicychat extract] and [rip extract <spicychat url>]."""
     log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
     sc.set_trace_level(verbose)
     started = time.monotonic()
     try:
-        result = sc.extract_character(url, log=log)
+        result = sc.extract_character(
+            url,
+            leak=leak,
+            leak_prompt=leak_prompt or sc.DEFAULT_LEAK_PROMPT,
+            leak_model=leak_model,
+            leak_attempts=leak_attempts,
+            leak_keep=leak_keep,
+            log=log,
+        )
     except sc.SpicyChatError as exc:
         _no(str(exc))
         raise SystemExit(1)
@@ -1690,12 +1763,20 @@ def _spicychat_extract(url: str, *, verbose: int = 0) -> None:
 
     character = result.get("character") or {}
     diagnostics = result.get("diagnostics") or {}
-    if character.get("definitionSource") == "spicychat-api":
+    source = character.get("definitionSource")
+    if source == "spicychat-api":
         _field("definition", f"[green]public — {diagnostics.get('definitionChars', 0)} chars[/]")
+    elif source == "spicychat-leak":
+        _field(
+            "definition",
+            f"[cyan]leaked via model dump — {diagnostics.get('definitionChars', 0)} chars "
+            "(lossy paraphrase)[/]",
+        )
     else:
         _field(
             "definition",
-            "[yellow]gated (definition_visible=false) — partial card (greeting + metadata)[/]",
+            "[yellow]gated (definition_visible=false) — partial card (greeting + metadata); "
+            "add --leak to recover[/]",
         )
     _field("greeting", f"{diagnostics.get('greetingChars', 0)} chars")
     _field("scenario", f"{diagnostics.get('scenarioChars', 0)} chars")
