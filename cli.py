@@ -170,9 +170,10 @@ class RipGroup(click.RichGroup):
     package_name="ripart", prog_name="rip", message="%(prog)s %(version)s"
 )
 def main() -> None:
-    """[bold]RIPart[/] - rip characters & lorebooks from JanitorAI.
+    """[bold]RIPart[/] - rip characters & lorebooks from JanitorAI, Saucepan & clank.world.
 
-    A small browser-driven CLI (powered by Botasaurus). Typical flow:
+    JanitorAI is browser-driven (powered by Botasaurus); Saucepan and clank.world
+    use their native APIs. Typical JanitorAI flow:
 
     \b
       1. rip login                     log in once (reused afterwards)
@@ -180,8 +181,10 @@ def main() -> None:
       3. rip inspect <url>             peek at a character's public metadata
       4. rip extract <url>             rip the full card + lorebook
 
-    Results are written under [cyan]output/cli/[/]. Run [bold]rip COMMAND --help[/]
-    for details on any command.
+    [bold]rip extract <url>[/] also accepts Saucepan and clank.world URLs; see
+    [bold]rip saucepan[/] and [bold]rip clank[/] for their own login/extract
+    commands. Results are written under [cyan]output/cli/[/]. Run
+    [bold]rip COMMAND --help[/] for details on any command.
     """
 
 
