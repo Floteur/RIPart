@@ -106,9 +106,33 @@ Run `rip COMMAND --help` for the full, colour-coded help of any command.
 | `rip login` | Open JanitorAI and wait for you to sign in. `--timeout SECONDS` (default 180). |
 | `rip import-session PATH` | Import a cookie/localStorage JSON dump into the profile - handy on headless servers where you can't log in interactively. |
 | `rip inspect URL` | Fetch a character's public metadata and public lorebooks (read-only). Writes `output/cli/inspections/<name>.json`. |
-| `rip extract URL` | Rip the private card + lorebook via `generateAlpha`. Writes the capture, raw lorebook, character card, and avatar under `output/cli/extracts/<name>/`. A `saucepan.ai` URL is routed to the Saucepan path below. |
+| `rip extract URL` | Rip the private card + lorebook via `generateAlpha`. Writes the capture, raw lorebook, character card, and avatar under `output/cli/extracts/<name>/`. A `saucepan.ai`, `clank.world`, `spicychat.ai`, `chub.ai`/`character-tavern.com`, or direct card-file URL is routed to the matching path below. |
 | `rip saucepan …` | Rip companions from [Saucepan](https://saucepan.ai) via its REST API (no browser). See below. |
+| `rip clank …` | Rip characters from [clank.world](https://clank.world) via its API (no browser). See below. |
+| `rip spicychat …` | Rip characters from [spicychat.ai](https://spicychat.ai) via its API (no browser, no login). See below. |
 | `rip completion [SHELL]` | Print instructions to enable tab-completion. |
+
+### Open archives (chub.ai, character-tavern, any card file)
+
+Some sites don't gate anything — a character's full definition ships as a public
+**Character Card** (spec V1/V2/V3). RIPart rips those directly, no login:
+
+```bash
+rip extract https://chub.ai/characters/<creator>/<slug>       # chub.ai / CharacterHub
+rip extract https://character-tavern.com/character/<path>      # Character Tavern
+rip extract https://example.com/some-character.png            # any embedded-card PNG
+rip extract https://example.com/some-character.charx          # a V3 .charx archive
+rip extract https://example.com/card.json                     # a raw JSON card
+```
+
+`chub.ai` (and its `characterhub.org` / `charhub.io` mirrors) reads the richest
+record from chub's API — definition, alternate greetings, and the embedded
+lorebook (trigger keys preserved). Every other open site funnels through a
+generic card-file ripper: it downloads the card, extracts the embedded/`.charx`/
+JSON card, and normalises it the same way. Adding a new open site is usually just
+a one-line URL adapter in `ripart.providers.tavern`. All of them share the
+reader core in `ripart.common.tavern` and write the same self-contained V3 card
+PNG as every other provider.
 
 ## Saucepan (saucepan.ai)
 
@@ -383,6 +407,72 @@ ripart.clank.set_session("<session-token>")          # or: rip clank login
 result = ripart.extract("https://www.clank.world/chat/<id>")
 print(result["character"]["description"])            # verbatim definition
 print(result["savedPath"])
+```
+
+## Spicychat (spicychat.ai)
+
+spicychat (a NextDayAI / `nd-api` platform) serves a character's definition
+**directly** from its REST API — *when the creator left it public*. Unlike
+clank and Saucepan there is nothing to leak in that case: `rip spicychat extract`
+reads `persona` (the definition), `dialogue` (example messages), `scenario`, and
+the greeting straight off `GET /v2/characters/<id>` and writes a full card.
+
+```bash
+rip spicychat extract <url>       # rip a character card (no login needed)
+rip spicychat search <query>      # text-search the public catalogue
+rip spicychat list                # browse the catalogue (most active first)
+rip spicychat login               # optional: store a refresh token (prompts)
+rip spicychat status              # confirm a login (guest works regardless)
+rip spicychat logout              # forget the stored session
+```
+
+`<url>` is a `spicychat.ai/chatbot/<uuid>` URL, a `.../characters/<uuid>` URL, or
+a bare UUID; a `spicychat.ai` URL passed to plain `rip extract` is routed here
+automatically. Cards land in the same UUID-keyed library
+(`output/cli/library/<id>.png`).
+
+**No login required.** Every request carries an `x-app-id: spicychat` header and
+a stable `x-guest-userid` (a UUID RIPart generates once and persists to a
+gitignored `.spicychat-session.json`). That guest identity is enough to read any
+**public** definition, so extraction works out of the box.
+
+**Gated definitions.** When a creator hides the definition
+(`definition_visible: false`), the API returns only the greeting + public
+metadata — even for a logged-in account. RIPart saves those as a **partial** card
+marked `spicychat-partial` (`description` empty), the same shape as clank's
+partial path. A verbatim leak for gated definitions is a future addition.
+
+**Browsing.** `rip spicychat search` queries the public Typesense index the web
+app uses (name / title / tags / creator). Each row shows whether the definition
+is `public` or `gated` and a URL to pass to `extract`:
+
+```bash
+rip spicychat search vampire                 # top matches for "vampire"
+rip spicychat list --tag Female --no-nsfw     # browse (no query) with filters
+rip spicychat search dragon --limit 50 --extract   # also rip each into the library
+```
+
+**Login (optional).** spicychat uses Kinde OAuth, so there is no username/password
+API login. Copy the **refresh token** from your browser session (`auth.spicychat.ai`)
+and paste it into `rip spicychat login`; RIPart mints short-lived access tokens
+from it on demand and rotates it automatically. Logging in adds NSFW visibility
+and higher rate limits but does **not** un-gate a hidden definition. Attached
+**lorebooks** surface as metadata only (name + entry count) — spicychat does not
+expose entry contents via its API — and are noted in creator notes.
+
+As a library:
+
+```python
+import ripart
+
+# Public definitions need no login:
+result = ripart.extract("https://spicychat.ai/chatbot/<uuid>")
+print(result["character"]["description"])            # the persona, verbatim
+print(result["savedPath"])
+
+# Optional login for NSFW visibility / rate limits:
+ripart.spicychat.set_refresh_token("<kinde-refresh-token>")
+hits = ripart.spicychat.search_characters("vampire", limit=10)
 ```
 
 ## Tab-completion

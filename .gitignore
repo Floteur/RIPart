@@ -28,6 +28,9 @@ output/
 # clank.world session cookies (secret; never commit or share).
 .clank-session.json
 
+# spicychat.ai guest id + Kinde refresh/access tokens (secret; never commit).
+.spicychat-session.json
+
 # Multi-account credential database for leak_bench (handles/passwords/tokens).
 # The *.example.json template is safe to commit; a real accounts file is not.
 accounts.json

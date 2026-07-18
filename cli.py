@@ -20,8 +20,11 @@ from rich.table import Table
 
 from .common.cards import save_to_library
 from .common.text import safe_name, write_json
+from .providers import chub as cb
 from .providers import clank as ck
 from .providers import saucepan as sp
+from .providers import spicychat as sc
+from .providers import tavern as tv
 from .providers.janitor import (
     extract_task,
     import_session_task,
@@ -67,6 +70,7 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Ripping", "commands": ["inspect", "extract", "recent"]},
         {"name": "Saucepan", "commands": ["saucepan"]},
         {"name": "Clank", "commands": ["clank"]},
+        {"name": "Spicychat", "commands": ["spicychat"]},
         {"name": "Setup", "commands": ["completion"]},
     ],
     "rip saucepan": [
@@ -76,6 +80,10 @@ click.rich_click.COMMAND_GROUPS = {
     "rip clank": [
         {"name": "Session & login", "commands": ["login", "status", "logout"]},
         {"name": "Ripping", "commands": ["list", "extract"]},
+    ],
+    "rip spicychat": [
+        {"name": "Session & login", "commands": ["login", "status", "logout"]},
+        {"name": "Ripping", "commands": ["search", "list", "extract"]},
     ],
 }
 
@@ -504,13 +512,31 @@ def extract(
 
     Paste a [bold]saucepan.ai/companion/<id>[/] URL and it is ripped directly
     through Saucepan's API (no browser); see [bold]rip saucepan[/]. A
-    [bold]clank.world/chat/<id>[/] URL is routed to [bold]rip clank[/].
+    [bold]clank.world/chat/<id>[/] URL is routed to [bold]rip clank[/], and a
+    [bold]spicychat.ai/chatbot/<id>[/] URL to [bold]rip spicychat[/].
+
+    Open archives are ripped straight from their public card: a
+    [bold]chub.ai/characters/<creator>/<slug>[/] URL, a
+    [bold]character-tavern.com/character/<path>[/] URL, or any direct card-file
+    URL ([cyan].png[/]/[cyan].charx[/]/[cyan].json[/]) is downloaded and parsed
+    with no login.
     """
     if ck.is_clank_url(url):
         _clank_extract(url, verbose=verbose)
         return
     if sp.is_saucepan_url(url):
         _saucepan_extract(url, verbose=verbose)
+        return
+    if sc.is_spicychat_url(url):
+        _spicychat_extract(url, verbose=verbose)
+        return
+    if tv.is_card_url(url):
+        # A direct card file (or character-tavern page) beats the chub check so a
+        # chub/CT CDN card URL isn't mistaken for a site page.
+        _tavern_extract(url, verbose=verbose)
+        return
+    if cb.is_chub_url(url):
+        _chub_extract(url, verbose=verbose)
         return
 
     started = time.monotonic()
@@ -1423,6 +1449,316 @@ def _clank_extract(
         elif diagnostics.get("lorebookError"):
             _field("lorebook", f"[yellow]not run: {diagnostics['lorebookError']}[/]")
     _field("time", _fmt_duration(elapsed))
+
+
+# --------------------------------------------------------------------------- #
+# spicychat
+# --------------------------------------------------------------------------- #
+
+
+@main.group(cls=click.RichGroup)
+def spicychat() -> None:
+    """Rip characters from [bold]spicychat.ai[/] via its API (no browser).
+
+    spicychat serves a character's definition directly when the creator left it
+    public — no login needed, a self-generated guest id is enough:
+
+    \b
+      1. rip spicychat search <query>    browse the public catalogue
+      2. rip spicychat extract <url>     rip the character card
+
+    When a definition is gated ([cyan]definition_visible=false[/]) only the
+    public surface (greeting, tags, avatar) is recovered — a [cyan]spicychat-partial[/]
+    card. Logging in ([bold]rip spicychat login[/]) adds NSFW visibility and
+    higher rate limits but does [bold]not[/] un-gate a definition. A
+    [cyan]spicychat.ai/chatbot/<id>[/] URL passed to [bold]rip extract[/] is
+    routed here too.
+    """
+
+
+@spicychat.command("login")
+@click.option(
+    "--refresh-token",
+    prompt="spicychat.ai Kinde refresh token",
+    help="The OAuth refresh token from your browser session (auth.spicychat.ai).",
+)
+def spicychat_login(refresh_token: str) -> None:
+    """Store a spicychat.ai refresh token and verify it mints an access token.
+
+    spicychat uses Kinde OAuth, so there is no username/password API login. Copy
+    the refresh token from your browser (dev tools → Application → Local/Session
+    storage or the token request on [cyan]auth.spicychat.ai[/]) and paste it
+    here; the client mints short-lived access tokens from it and rotates it
+    automatically.
+    """
+    sc.set_refresh_token(refresh_token)
+    try:
+        sc.authenticate()
+    except sc.SpicyChatError as exc:
+        _no(str(exc))
+        sys.exit(1)
+    _ok("spicychat.ai session saved")
+    _path("session file", sc.SESSION_FILE)
+
+
+@spicychat.command("status")
+def spicychat_status() -> None:
+    """Report whether a spicychat.ai login is configured (guest works regardless)."""
+    if not sc.has_token():
+        _no("no spicychat.ai login [dim](guest extraction of public definitions still works)[/]")
+        sys.exit(1)
+    try:
+        sc.authenticate()
+    except sc.SpicyChatError as exc:
+        _no(str(exc))
+        sys.exit(1)
+    _ok("spicychat.ai session configured")
+    _field("access token expires in", _fmt_expiry(sc.token_expiry() - time.time()))
+    sys.exit(0)
+
+
+@spicychat.command("logout")
+def spicychat_logout() -> None:
+    """Forget the stored spicychat.ai session (guest id included)."""
+    sc.clear_session()
+    _ok("spicychat.ai session cleared")
+
+
+def _tag_option(func):
+    return click.option(
+        "--tag",
+        "tags",
+        multiple=True,
+        metavar="TAG",
+        help="Filter by tag (repeatable, case-sensitive — e.g. Female, Anime).",
+    )(func)
+
+
+def _catalogue_options(func):
+    """The options shared by [rip spicychat search] and [rip spicychat list]."""
+    func = click.option(
+        "--limit", type=int, default=30, show_default=True, help="Max results to list."
+    )(func)
+    func = _tag_option(func)
+    func = click.option(
+        "--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW characters."
+    )(func)
+    func = click.option(
+        "--extract",
+        "do_extract",
+        is_flag=True,
+        default=False,
+        help="Also rip each listed character into the library (full card when the "
+        "definition is public, else a spicychat-partial card).",
+    )(func)
+    return verbose_option(func)
+
+
+@spicychat.command("search")
+@click.argument("query", metavar="QUERY")
+@_catalogue_options
+def spicychat_search(
+    query: str,
+    limit: int,
+    tags: tuple[str, ...],
+    nsfw: bool,
+    do_extract: bool,
+    verbose: int,
+) -> None:
+    """Text-search the public spicychat.ai catalogue by name/title/tags/creator.
+
+    Prints the character, whether its definition is public, tags and a URL you
+    can pass to [bold]rip spicychat extract[/]. With [bold]--extract[/] each is
+    also ripped into the library. Use [bold]rip spicychat list[/] to browse
+    without a query.
+    """
+    _spicychat_list(query, limit=limit, tags=tags, nsfw=nsfw, do_extract=do_extract, verbose=verbose)
+
+
+@spicychat.command("list")
+@_catalogue_options
+def spicychat_list(
+    limit: int,
+    tags: tuple[str, ...],
+    nsfw: bool,
+    do_extract: bool,
+    verbose: int,
+) -> None:
+    """Browse the public spicychat.ai catalogue (most active first).
+
+    Like [bold]rip spicychat search[/] but with no query — pages the catalogue
+    ranked by recent activity. Narrow it with [bold]--tag[/] / [bold]--no-nsfw[/],
+    and rip each listed character with [bold]--extract[/].
+    """
+    _spicychat_list("", limit=limit, tags=tags, nsfw=nsfw, do_extract=do_extract, verbose=verbose)
+
+
+def _spicychat_list(
+    query: str,
+    *,
+    limit: int,
+    tags: tuple[str, ...],
+    nsfw: bool,
+    do_extract: bool,
+    verbose: int,
+) -> None:
+    """Shared impl for [rip spicychat search] and [rip spicychat list]."""
+    sc.set_trace_level(verbose)
+    try:
+        result = sc.search_characters(
+            query, limit=limit, tags=list(tags) or None, include_nsfw=nsfw
+        )
+    except sc.SpicyChatError as exc:
+        _no(str(exc))
+        sys.exit(1)
+    finally:
+        sc.set_trace_level(0)
+
+    hits = result.get("hits") or []
+    if not hits:
+        _no("no characters returned")
+        return
+
+    table = Table(box=None, pad_edge=False, show_edge=False)
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("character", style="bold")
+    table.add_column("def", justify="center")
+    table.add_column("chats", justify="right")
+    table.add_column("tags", style="dim")
+    table.add_column("url")
+    for i, doc in enumerate(hits, 1):
+        tag_list = doc.get("tags") if isinstance(doc.get("tags"), list) else []
+        nsfw_mark = " [red]nsfw[/]" if doc.get("is_nsfw") else ""
+        public = "[green]public[/]" if doc.get("definition_visible") else "[yellow]gated[/]"
+        table.add_row(
+            str(i),
+            (str(doc.get("name") or "?")[:34]) + nsfw_mark,
+            public,
+            str(doc.get("num_messages") or "0"),
+            ", ".join(tag_list[:4]),
+            sc.character_url(str(doc.get("character_id") or "")),
+        )
+    console.print(table)
+    _field("found", f"{result.get('found', len(hits))} total (showing {len(hits)})")
+
+    if do_extract:
+        library_dir = OUT / "library"
+        saved = 0
+        for doc in hits:
+            cid = str(doc.get("character_id") or "")
+            try:
+                res = sc.extract_character(cid)
+                save_to_library(library_dir, res.get("characterId") or cid, res)
+                saved += 1
+            except sc.SpicyChatError as exc:
+                err_console.print(f"[yellow]![/] {doc.get('name')}: {exc}")
+        _ok(f"saved [bold]{saved}[/] card(s) to {library_dir}")
+
+
+@spicychat.command("extract")
+@click.argument("url", metavar="URL_OR_UUID")
+@verbose_option
+def spicychat_extract(url: str, verbose: int) -> None:
+    """Rip a spicychat.ai character card from a chatbot URL or UUID.
+
+    URL can be a [cyan]spicychat.ai/chatbot/<uuid>[/] URL, a
+    [cyan]spicychat.ai/characters/<uuid>[/] URL, or a bare UUID. No login is
+    required for a character whose definition is public.
+    """
+    _spicychat_extract(url, verbose=verbose)
+
+
+def _spicychat_extract(url: str, *, verbose: int = 0) -> None:
+    """Shared impl for [rip spicychat extract] and [rip extract <spicychat url>]."""
+    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
+    sc.set_trace_level(verbose)
+    started = time.monotonic()
+    try:
+        result = sc.extract_character(url, log=log)
+    except sc.SpicyChatError as exc:
+        _no(str(exc))
+        raise SystemExit(1)
+    finally:
+        sc.set_trace_level(0)
+    elapsed = time.monotonic() - started
+
+    library_dir = OUT / "library"
+    paths = save_to_library(library_dir, result.get("characterId") or "", result)
+
+    _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](spicychat)[/]")
+    _path("card png", paths["png"])
+
+    character = result.get("character") or {}
+    diagnostics = result.get("diagnostics") or {}
+    if character.get("definitionSource") == "spicychat-api":
+        _field("definition", f"[green]public — {diagnostics.get('definitionChars', 0)} chars[/]")
+    else:
+        _field(
+            "definition",
+            "[yellow]gated (definition_visible=false) — partial card (greeting + metadata)[/]",
+        )
+    _field("greeting", f"{diagnostics.get('greetingChars', 0)} chars")
+    _field("scenario", f"{diagnostics.get('scenarioChars', 0)} chars")
+    _field("example dialogue", f"{diagnostics.get('exampleChars', 0)} chars")
+    tags = diagnostics.get("tags") or []
+    if tags:
+        _field("tags", ", ".join(tags))
+    if diagnostics.get("lorebookCount"):
+        _field("lorebooks", f"{diagnostics['lorebookCount']} attached [dim](entries gated)[/]")
+    _field("time", _fmt_duration(elapsed))
+
+
+def _report_open_card(result: dict, *, platform: str, url: str, elapsed: float) -> None:
+    """Shared result printer for the open-archive rippers (chub, tavern)."""
+    library_dir = OUT / "library"
+    paths = save_to_library(library_dir, result.get("characterId") or "card", result)
+
+    _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim]({platform})[/]")
+    _path("card png", paths["png"])
+
+    diagnostics = result.get("diagnostics") or {}
+    _field("definition", f"[green]public — {diagnostics.get('descriptionChars', 0)} chars[/]")
+    _field("first message", f"{diagnostics.get('firstMessageChars', 0)} chars")
+    _field("example dialogue", f"{diagnostics.get('exampleChars', 0)} chars")
+    if diagnostics.get("alternateGreetings"):
+        _field("alt greetings", diagnostics["alternateGreetings"])
+    if diagnostics.get("lorebookEntries"):
+        _field("lorebook", f"{diagnostics['lorebookEntries']} entries [dim](keys preserved)[/]")
+    tags = diagnostics.get("tags") or []
+    if tags:
+        _field("tags", ", ".join(tags[:8]))
+    _field("time", _fmt_duration(elapsed))
+
+
+def _chub_extract(url: str, *, verbose: int = 0) -> None:
+    """Shared impl for [rip extract <chub url>]."""
+    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
+    cb.set_trace_level(verbose)
+    started = time.monotonic()
+    try:
+        result = cb.extract_character(url, log=log)
+    except cb.ChubError as exc:
+        _no(str(exc))
+        raise SystemExit(1)
+    finally:
+        cb.set_trace_level(0)
+    _report_open_card(result, platform="chub", url=url, elapsed=time.monotonic() - started)
+
+
+def _tavern_extract(url: str, *, verbose: int = 0) -> None:
+    """Shared impl for [rip extract <card-file / character-tavern url>]."""
+    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
+    tv.set_trace_level(verbose)
+    started = time.monotonic()
+    try:
+        result = tv.extract_card(url, log=log)
+    except tv.TavernCardError as exc:
+        _no(str(exc))
+        raise SystemExit(1)
+    finally:
+        tv.set_trace_level(0)
+    platform = result.get("diagnostics", {}).get("cardKind") or "card"
+    _report_open_card(result, platform=f"tavern-{platform}", url=url, elapsed=time.monotonic() - started)
 
 
 # --------------------------------------------------------------------------- #

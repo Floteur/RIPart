@@ -29,7 +29,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .common.cards import save_to_library
-from .providers import clank, saucepan
+from .providers import chub, clank, saucepan, spicychat, tavern
+from .providers.chub import ChubError
 from .providers.clank import ClankError
 from .providers.janitor import (
     extract_task,
@@ -40,11 +41,17 @@ from .providers.janitor import (
     status_task,
 )
 from .providers.saucepan import SaucepanError
+from .providers.spicychat import SpicyChatError
+from .providers.tavern import TavernCardError
 
 __all__ = [
     "DEFAULT_OUTPUT_DIR",
+    "ChubError",
     "ClankError",
     "SaucepanError",
+    "SpicyChatError",
+    "TavernCardError",
+    "chub",
     "clank",
     "extract",
     "import_session",
@@ -54,6 +61,8 @@ __all__ = [
     "recent",
     "save",
     "saucepan",
+    "spicychat",
+    "tavern",
 ]
 
 # Where :func:`extract`/:func:`recent` write ripped cards by default. Relative to
@@ -212,6 +221,29 @@ def extract(
             )
         finally:
             saucepan.set_trace_level(0)
+    elif spicychat.is_spicychat_url(url):
+        spicychat.set_trace_level(verbose)
+        try:
+            result = spicychat.extract_character(
+                url, log=log or (lambda _message: None)
+            )
+        finally:
+            spicychat.set_trace_level(0)
+    elif tavern.is_card_url(url):
+        # A direct card *file* (.png/.charx/.json, or a character-tavern page) is
+        # the most specific match — check it before the platform-page routers so
+        # a chub/CT CDN card URL isn't mistaken for a site page.
+        tavern.set_trace_level(verbose)
+        try:
+            result = tavern.extract_card(url, log=log or (lambda _message: None))
+        finally:
+            tavern.set_trace_level(0)
+    elif chub.is_chub_url(url):
+        chub.set_trace_level(verbose)
+        try:
+            result = chub.extract_character(url, log=log or (lambda _message: None))
+        finally:
+            chub.set_trace_level(0)
     else:
         result = extract_task(
             {

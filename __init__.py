@@ -1,4 +1,5 @@
-"""RIPart — rip characters & lorebooks from JanitorAI, Saucepan, and clank.world.
+"""RIPart — rip characters & lorebooks from JanitorAI, Saucepan, clank.world,
+spicychat.ai, chub.ai, character-tavern, and any public Tavern card file.
 
 Use it as a library:
 
@@ -15,8 +16,12 @@ from __future__ import annotations
 
 from .api import (
     DEFAULT_OUTPUT_DIR,
+    ChubError,
     ClankError,
     SaucepanError,
+    SpicyChatError,
+    TavernCardError,
+    chub,
     clank,
     extract,
     import_session,
@@ -26,6 +31,8 @@ from .api import (
     recent,
     save,
     saucepan,
+    spicychat,
+    tavern,
 )
 
 try:
@@ -37,9 +44,13 @@ except PackageNotFoundError:  # pragma: no cover - running from a source tree
 
 __all__ = [
     "DEFAULT_OUTPUT_DIR",
+    "ChubError",
     "ClankError",
     "SaucepanError",
+    "SpicyChatError",
+    "TavernCardError",
     "__version__",
+    "chub",
     "clank",
     "extract",
     "import_session",
@@ -49,4 +60,6 @@ __all__ = [
     "recent",
     "save",
     "saucepan",
+    "spicychat",
+    "tavern",
 ]

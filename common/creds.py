@@ -86,6 +86,20 @@ class CredentialStore:
             except OSError:
                 pass
 
+    def persist_active(self, value: Any) -> None:
+        """Update the active credential in place after an in-flight refresh.
+
+        When a thread override is active (a worker running under :meth:`use`),
+        the new value replaces that override in memory only — never touching the
+        shared on-disk credential. Otherwise it is stored globally (memory +
+        disk). This lets token-rotation flows save a freshly minted token without
+        one account's refresh clobbering another's persisted credential.
+        """
+        if getattr(self._override, "value", None) is not None:
+            self._override.value = value
+        else:
+            self.store(value)
+
     def clear(self) -> None:
         """Forget the credential (log out)."""
         self._value = self._empty
