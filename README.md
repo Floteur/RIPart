@@ -268,6 +268,123 @@ call (status + timing), and `-vvv` adds a truncated preview of each raw
 request/response payload — for tracing a bug all the way down to the wire
 (`rip extract <url> -vvv`, `rip saucepan extract <url> --leak -vvv`).
 
+## Clank (clank.world)
+
+clank.world gates the real character definition — its API returns
+`description: null` for the character body and exposes only public metadata
+(name, avatar, a story blurb). The full definition lives only in the *system
+prompt* clank sends to the model at generation time.
+
+RIPart recovers it **verbatim** with an **echo proxy**: an OpenAI-compatible
+endpoint that echoes clank's request body straight back as the assistant reply.
+When a chat's *custom LLM provider* points at that proxy and a message is sent,
+clank posts its whole prompt to the proxy and stores the echoed JSON as an
+assistant message. That JSON's system (`developer`) message is the character's
+definition, so the body, greeting, and example dialogue come back byte-for-byte
+— no model paraphrasing (unlike the Saucepan chat-leak).
+
+```bash
+rip clank login                 # store your session cookie (prompts for the token)
+rip clank status                # confirm a session is configured (exit 0 = yes)
+rip clank list                  # browse stories/characters, newest-first
+rip clank extract <chat-url>    # rip the character card from a chat
+rip clank logout                # forget the stored session
+```
+
+**Browsing.** `rip clank list` pages the public feed (`agent.get_all_clank_stories`)
+and prints each character with its tags, chat count, and character URL:
+
+```bash
+rip clank list                       # 30 newest stories
+rip clank list --sort trending       # clank's ranked feed instead of newest-first
+rip clank list --limit 100           # page deeper (follows the cursor automatically)
+rip clank list --tag Female --tag Husband   # filter by tag (case-sensitive, repeatable)
+rip clank list --no-nsfw             # exclude NSFW
+rip clank list --limit 20 --extract  # also save a partial card for each (see below)
+```
+
+The feed exposes public metadata (name, scenario, greeting(s), avatar, tags,
+creator) but **not** the gated character definition. `--extract` saves a
+**partial** card per story from that public data (marked `clank-partial`,
+`description` empty) — useful for bulk-cataloguing; backfill the definition later
+with the echo leak. From the library: `ripart.clank.list_stories(...)` /
+`iter_stories(...)` / `extract_story(scene_or_item)`.
+
+**What the echo leak captures vs. what it can't.** The echoed `developer` prompt
+is the character's system prompt verbatim, so `description`, `first_mes`, and
+`mes_example` come back byte-for-byte; `scenario`, `tags`, and alternate
+greetings are merged in from the scene's public data. clank injects some things
+**conditionally**, so a single trivial message won't include them: creator
+**lorebook** entries (injected only when recent messages hit their trigger
+keywords — clank has a `lorebook` router but exposes only *your own* lorebooks
+via read API), long-chat **memory/summaries**, and additional **scenes**
+(a character can have several, each its own greeting + scenario). Multi-character
+scenes and voice **audio** exist as fields too and are noted in creator notes.
+
+`<chat-url>` is a `clank.world/chat/<id>` URL (or a bare chat UUID). You can also
+pass a **character page** URL (`clank.world/@<slug>`, e.g.
+`@c/physical-longer-top`) — RIPart resolves it to your existing chat with that
+character (open a chat and send one message first, so there's an echo to read).
+A `clank.world/chat/<id>` URL passed to plain `rip extract` is routed here
+automatically. Extracted cards land in the same UUID-keyed library as the other
+paths (`output/cli/library/<id>.png`, a self-contained V3 card).
+
+**Auth.** clank uses `next-auth`, so there is no username/password API login.
+Copy the `__Secure-next-auth.session-token` cookie from your browser (dev tools
+→ Application → Cookies → `www.clank.world`) and paste it into `rip clank login`.
+The cookie is saved to a gitignored `.clank-session.json` and reused.
+
+**Setting up the leak.** In clank, open the chat's model settings and add a
+**custom provider** whose base URL is your echo proxy (an OpenAI-compatible
+worker that echoes the request body — see `clank.py` for the reference worker),
+then send any message. The echoed system prompt lands in the chat history, and
+`rip clank extract` parses it into the card:
+
+- `description` ← the character body (between `You are the following character:`
+  and clank's generic rules)
+- `mes_example` ← the `{{user}}`/`{{char}}` lines under `## DIALOGUE EXAMPLES`
+- `first_mes` ← the greeting (first assistant turn in the echoed prompt)
+- `--keep-boilerplate` keeps clank's generic RP/formatting rules in creator notes
+
+Cards leaked this way are marked `definitionSource: clank-echo-leak`, and the raw
+system prompt is saved next to the card as `output/cli/library/<id>.leak.txt`.
+
+**Dumping the lorebook (`--lorebook`).** A character's lorebook entries inject
+into the prompt only when their **trigger keywords** appear in recent messages,
+so RIPart fires them the JanitorAI way: it builds trigger messages from the
+card's own text (description + scenario + greeting — where the keywords live),
+sends each into the chat, and diffs the **system side** of each expanded echo
+against the base prompt to recover the injected entries. Recovered entries are
+appended to the card's creator notes.
+
+```bash
+rip clank login --session-token <token> --csrf-token <csrf>   # csrf needed to send
+rip clank extract <chat-url> --lorebook --max-triggers 8
+```
+
+Notes: sending needs the **CSRF cookie** (pass `--csrf-token` at login). Each
+trigger is a real (slow) generation, so `--max-triggers` caps the work. Run it on
+a **fresh** chat — clank also injects a running **memory/summary** into the system
+prompt as a chat grows, which would otherwise show up alongside true lorebook
+entries. A character with no lorebook simply yields no entries.
+
+**`--leak` (auto-generate).** The message-send is wired (`/api/chat`), so
+`--lorebook` works on a chat that already has the proxy. Full `--leak`
+auto-configuration of a *fresh* chat additionally needs the provider-set mutation
+(`agent.set_chat_llm_provider` / `upsert_user_llm_provider`) wired; until then,
+set the echo proxy on the chat by hand once, then use `--lorebook` / `extract`.
+
+As a library:
+
+```python
+import ripart
+
+ripart.clank.set_session("<session-token>")          # or: rip clank login
+result = ripart.extract("https://www.clank.world/chat/<id>")
+print(result["character"]["description"])            # verbatim definition
+print(result["savedPath"])
+```
+
 ## Tab-completion
 
 `rip` supports shell completion (bash, zsh, fish). Print the snippet for your
@@ -335,6 +452,7 @@ ripart/
 ├── cli.py             # command-line interface (this is the user-facing layer)
 ├── browser_tasks.py   # Botasaurus tasks that drive the browser (JanitorAI)
 ├── saucepan.py        # Saucepan REST extraction (no browser)
+├── clank.py           # clank.world extraction via echo-proxy leak (no browser)
 ├── tests/             # unit tests for the Saucepan pure functions
 ├── helpers.py         # parsing / formatting utilities
 └── __main__.py        # enables `python -m ripart`

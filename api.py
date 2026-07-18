@@ -28,7 +28,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from . import saucepan
+from . import clank, saucepan
 from .browser_tasks import (
     extract_task,
     import_session_task,
@@ -37,12 +37,15 @@ from .browser_tasks import (
     recent_task,
     status_task,
 )
+from .clank import ClankError
 from .helpers import save_to_library
 from .saucepan import SaucepanError
 
 __all__ = [
     "DEFAULT_OUTPUT_DIR",
+    "ClankError",
     "SaucepanError",
+    "clank",
     "extract",
     "import_session",
     "inspect",
@@ -153,6 +156,9 @@ def extract(
     leak_prompt: str | None = None,
     leak_keep: bool = False,
     leak_timeout: int = 180,
+    # clank-only options (used when ``url`` is a clank.world chat URL):
+    clank_keep_boilerplate: bool = False,
+    clank_trigger_message: str = "hi",
     log: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Rip a character's full card + lorebook and (by default) save it.
@@ -176,7 +182,20 @@ def extract(
     for digging into a failure. Levels 2/3 print directly (they are not routed
     through ``log``).
     """
-    if saucepan.is_saucepan_url(url):
+    if clank.is_clank_url(url):
+        clank.set_trace_level(verbose)
+        try:
+            result = clank.extract_chat(
+                url,
+                leak=leak,
+                keep_boilerplate=clank_keep_boilerplate,
+                trigger_message=clank_trigger_message,
+                leak_timeout=leak_timeout,
+                log=log or (lambda _message: None),
+            )
+        finally:
+            clank.set_trace_level(0)
+    elif saucepan.is_saucepan_url(url):
         saucepan.set_trace_level(verbose)
         try:
             result = saucepan.extract_companion(

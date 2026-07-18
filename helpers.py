@@ -537,7 +537,7 @@ def _public_book_entries(
 def build_character_book(
     entries: list[str] | None,
     public_lorebooks: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Assemble a Tavern ``character_book`` from all available lorebook data.
 
     Two sources, deduped by content: (1) accessible public-lorebook entries,
@@ -545,6 +545,9 @@ def build_character_book(
     (2) the extracted closed-lorebook blocks, which are stored ``constant``
     (always active) with empty keys since we can't recover their trigger words.
     Includes the V3-required ``use_regex``/``extensions`` fields (harmless for V2).
+
+    Returns ``None`` when there is no lorebook data at all, so the caller can omit
+    the ``character_book`` field entirely rather than embedding an empty book.
     """
     book_entries: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -593,6 +596,10 @@ def build_character_book(
     for content in entries or []:
         _add(content, keys=[], secondary=[], comment="", constant=True, enabled=True)
 
+    # No lorebook data at all → signal the caller to omit character_book entirely.
+    if not book_entries:
+        return None
+
     return {
         "name": "",
         "description": "",
@@ -634,29 +641,32 @@ def build_card_v2(
     public_lorebooks: list[dict[str, Any]] | None = None,
     source_url: str = "",
 ) -> dict[str, Any]:
-    """Assemble a Tavern ``chara_card_v2`` dict with the lorebook embedded."""
+    """Assemble a Tavern ``chara_card_v2`` dict with the lorebook embedded.
+
+    The ``character_book`` field is included only when there is lorebook data;
+    an empty book is omitted entirely.
+    """
     meta = meta or {}
-    return {
-        "spec": "chara_card_v2",
-        "spec_version": "2.0",
-        "data": {
-            "name": character.get("name") or "",
-            "description": character.get("description") or "",
-            "personality": character.get("personality") or "",
-            "scenario": character.get("scenario") or "",
-            "first_mes": character.get("firstMessage") or "",
-            "mes_example": character.get("exampleMessages") or "",
-            "creator_notes": character.get("creatorNotes") or "",
-            "system_prompt": "",
-            "post_history_instructions": "",
-            "tags": character.get("tags") or [],
-            "creator": meta.get("creator_name") or "",
-            "character_version": "1.0",
-            "alternate_greetings": character.get("alternateGreetings") or [],
-            "extensions": _card_provenance(meta, source_url, character),
-            "character_book": build_character_book(entries, public_lorebooks),
-        },
+    data = {
+        "name": character.get("name") or "",
+        "description": character.get("description") or "",
+        "personality": character.get("personality") or "",
+        "scenario": character.get("scenario") or "",
+        "first_mes": character.get("firstMessage") or "",
+        "mes_example": character.get("exampleMessages") or "",
+        "creator_notes": character.get("creatorNotes") or "",
+        "system_prompt": "",
+        "post_history_instructions": "",
+        "tags": character.get("tags") or [],
+        "creator": meta.get("creator_name") or "",
+        "character_version": "1.0",
+        "alternate_greetings": character.get("alternateGreetings") or [],
+        "extensions": _card_provenance(meta, source_url, character),
     }
+    book = build_character_book(entries, public_lorebooks)
+    if book is not None:
+        data["character_book"] = book
+    return {"spec": "chara_card_v2", "spec_version": "2.0", "data": data}
 
 
 def build_card_v3(
@@ -677,36 +687,33 @@ def build_card_v3(
     meta = meta or {}
     if timestamp is None:
         timestamp = int(datetime.now(timezone.utc).timestamp())
-    return {
-        "spec": "chara_card_v3",
-        "spec_version": "3.0",
-        "data": {
-            "name": character.get("name") or "",
-            "description": character.get("description") or "",
-            "personality": character.get("personality") or "",
-            "scenario": character.get("scenario") or "",
-            "first_mes": character.get("firstMessage") or "",
-            "mes_example": character.get("exampleMessages") or "",
-            "creator_notes": character.get("creatorNotes") or "",
-            "system_prompt": "",
-            "post_history_instructions": "",
-            "tags": character.get("tags") or [],
-            "creator": meta.get("creator_name") or "",
-            "character_version": "1.0",
-            "alternate_greetings": character.get("alternateGreetings") or [],
-            "group_only_greetings": [],
-            "nickname": "",
-            "creator_notes_multilingual": {},
-            "source": [source_url] if source_url else [],
-            "assets": [
-                {"type": "icon", "uri": "ccdefault:", "name": "main", "ext": "png"}
-            ],
-            "creation_date": timestamp,
-            "modification_date": timestamp,
-            "extensions": _card_provenance(meta, source_url, character),
-            "character_book": build_character_book(entries, public_lorebooks),
-        },
+    data = {
+        "name": character.get("name") or "",
+        "description": character.get("description") or "",
+        "personality": character.get("personality") or "",
+        "scenario": character.get("scenario") or "",
+        "first_mes": character.get("firstMessage") or "",
+        "mes_example": character.get("exampleMessages") or "",
+        "creator_notes": character.get("creatorNotes") or "",
+        "system_prompt": "",
+        "post_history_instructions": "",
+        "tags": character.get("tags") or [],
+        "creator": meta.get("creator_name") or "",
+        "character_version": "1.0",
+        "alternate_greetings": character.get("alternateGreetings") or [],
+        "group_only_greetings": [],
+        "nickname": "",
+        "creator_notes_multilingual": {},
+        "source": [source_url] if source_url else [],
+        "assets": [{"type": "icon", "uri": "ccdefault:", "name": "main", "ext": "png"}],
+        "creation_date": timestamp,
+        "modification_date": timestamp,
+        "extensions": _card_provenance(meta, source_url, character),
     }
+    book = build_character_book(entries, public_lorebooks)
+    if book is not None:
+        data["character_book"] = book
+    return {"spec": "chara_card_v3", "spec_version": "3.0", "data": data}
 
 
 def encode_card_png(

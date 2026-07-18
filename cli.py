@@ -26,6 +26,7 @@ from .browser_tasks import (
     recent_task,
     status_task,
 )
+from . import clank as ck
 from . import saucepan as sp
 from .helpers import safe_name, save_to_library, write_json
 
@@ -64,11 +65,16 @@ click.rich_click.COMMAND_GROUPS = {
         {"name": "Session & login", "commands": ["status", "login", "import-session"]},
         {"name": "Ripping", "commands": ["inspect", "extract", "recent"]},
         {"name": "Saucepan", "commands": ["saucepan"]},
+        {"name": "Clank", "commands": ["clank"]},
         {"name": "Setup", "commands": ["completion"]},
     ],
     "rip saucepan": [
         {"name": "Session & login", "commands": ["login", "status", "logout"]},
         {"name": "Ripping", "commands": ["extract", "providers"]},
+    ],
+    "rip clank": [
+        {"name": "Session & login", "commands": ["login", "status", "logout"]},
+        {"name": "Ripping", "commands": ["list", "extract"]},
     ],
 }
 
@@ -493,8 +499,12 @@ def extract(
     (V3 card + embedded lorebook) at [cyan]output/cli/library/<uuid>.png[/].
 
     Paste a [bold]saucepan.ai/companion/<id>[/] URL and it is ripped directly
-    through Saucepan's API (no browser); see [bold]rip saucepan[/].
+    through Saucepan's API (no browser); see [bold]rip saucepan[/]. A
+    [bold]clank.world/chat/<id>[/] URL is routed to [bold]rip clank[/].
     """
+    if ck.is_clank_url(url):
+        _clank_extract(url, verbose=verbose)
+        return
     if sp.is_saucepan_url(url):
         _saucepan_extract(url, verbose=verbose)
         return
@@ -907,6 +917,13 @@ def saucepan_providers() -> None:
     help="[--leak] Accept the model's reply even if it doesn't look like a definition "
     "dump (by default such replies are retried, since models often just keep roleplaying).",
 )
+@click.option(
+    "--leak-echo/--no-leak-echo",
+    default=True,
+    help="[--leak] Prefer the verbatim echo-proxy leak (points a BYOK --leak-config's "
+    "provider_url at an echo endpoint to reflect the assembled prompt back). Falls back "
+    "to the model dump if the account doesn't allow custom endpoints. On by default.",
+)
 @verbose_option
 def saucepan_extract(
     url: str,
@@ -918,6 +935,7 @@ def saucepan_extract(
     leak_prompt: str | None,
     leak_system: str | None,
     leak_keep: bool,
+    leak_echo: bool,
     verbose: int,
 ) -> None:
     """Rip a Saucepan companion card + lorebooks by URL (or bare companion id)."""
@@ -931,6 +949,7 @@ def saucepan_extract(
         leak_prompt=leak_prompt,
         leak_system=leak_system,
         leak_keep=leak_keep,
+        leak_echo=leak_echo,
         verbose=verbose,
     )
 
@@ -959,6 +978,7 @@ def _saucepan_extract(
     leak_prompt: str | None = None,
     leak_system: str | None = None,
     leak_keep: bool = False,
+    leak_echo: bool = True,
     verbose: int = 0,
 ) -> None:
     """Shared implementation for [rip saucepan extract] and [rip extract <sp url>]."""
@@ -1017,6 +1037,7 @@ def _saucepan_extract(
             leak_mode=leak_mode,
             leak_prompt=leak_prompt,
             leak_keep=leak_keep,
+            leak_echo=leak_echo,
             log=log,
         )
     except sp.SaucepanError as exc:
@@ -1062,7 +1083,12 @@ def _saucepan_extract(
         f"{diagnostics.get('lorebookEntries', 0)} in {diagnostics.get('lorebooks', 0)} book(s)",
     )
     source = character.get("definitionSource")
-    if source == "saucepan-leak":
+    if source == "saucepan-echo":
+        _field(
+            "definition",
+            f"[green]leaked {diagnostics.get('leakChars', 0)} chars verbatim via echo proxy[/]",
+        )
+    elif source == "saucepan-leak":
         _field(
             "definition",
             f"[green]leaked {diagnostics.get('leakChars', 0)} chars via model[/] [dim](lossy)[/]",
@@ -1085,6 +1111,314 @@ def _saucepan_extract(
         _field("lorebooks", diagnostics.get("lorebooks", 0))
         if leak and diagnostics.get("leakError"):
             _field("leak error", diagnostics["leakError"])
+
+
+# --------------------------------------------------------------------------- #
+# clank
+# --------------------------------------------------------------------------- #
+
+
+@main.group(cls=click.RichGroup)
+def clank() -> None:
+    """Rip characters from [bold]clank.world[/] via its API (no browser).
+
+    clank.world gates the real character definition, but the full system prompt
+    is recoverable verbatim with an [bold]echo proxy[/] — an OpenAI-compatible
+    endpoint that echoes clank's request body back. Point a chat's custom LLM
+    provider at the proxy, send a message, and the echoed system prompt is the
+    definition. Then:
+
+    \b
+      1. rip clank login             store your session cookie (reused afterwards)
+      2. rip clank status            confirm a session is configured
+      3. rip clank extract <url>     rip the character card from a chat
+
+    A [cyan]clank.world/chat/<id>[/] URL passed to [bold]rip extract[/] is routed
+    here too.
+    """
+
+
+@clank.command("login")
+@click.option(
+    "--session-token",
+    prompt="clank.world session token (__Secure-next-auth.session-token)",
+    help="The value of the __Secure-next-auth.session-token cookie from your browser.",
+)
+@click.option(
+    "--csrf-token",
+    default=None,
+    help="The __Host-next-auth.csrf-token cookie value (needed only for --leak auto-generation).",
+)
+def clank_login(session_token: str, csrf_token: str | None) -> None:
+    """Store your clank.world session cookie (copied from your browser).
+
+    clank uses next-auth, so there is no username/password API login. Copy the
+    [cyan]__Secure-next-auth.session-token[/] cookie from your browser's dev
+    tools (Application → Cookies → www.clank.world) and paste it here.
+    """
+    ck.set_session(session_token, csrf_token)
+    _ok("session saved")
+    _path("session file", ck.SESSION_FILE)
+
+
+@clank.command("status")
+def clank_status() -> None:
+    """Report whether a clank.world session is configured."""
+    if not ck.has_session():
+        _no("no clank.world session - run [bold]rip clank login[/] first")
+        sys.exit(1)
+    has_csrf = bool(ck.load_session().get("csrf_token"))
+    _ok(
+        "clank.world session configured"
+        + ("" if has_csrf else " [dim](no csrf token; --leak auto-generation unavailable)[/]")
+    )
+    sys.exit(0)
+
+
+@clank.command("logout")
+def clank_logout() -> None:
+    """Forget the stored clank.world session."""
+    ck.clear_session()
+    _ok("clank.world session cleared")
+
+
+@clank.command("list")
+@click.option(
+    "--sort",
+    type=click.Choice(["new", "trending"]),
+    default="new",
+    show_default=True,
+    help="'new' = newest-first; 'trending' = clank's ranked feed.",
+)
+@click.option("--limit", type=int, default=30, show_default=True, help="Max stories to list.")
+@click.option(
+    "--tag",
+    "tags",
+    multiple=True,
+    metavar="TAG",
+    help="Filter by tag (repeatable). Tags are case-sensitive (e.g. Female, Husband).",
+)
+@click.option("--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW stories.")
+@click.option("--page-size", type=int, default=20, show_default=True, help="Items fetched per API page.")
+@click.option(
+    "--extract",
+    "do_extract",
+    is_flag=True,
+    default=False,
+    help="Save a partial card for each listed story (public data only — name, "
+    "scenario, greetings, tags, avatar; the definition stays gated). Marked clank-partial.",
+)
+def clank_list(
+    sort: str, limit: int, tags: tuple[str, ...], nsfw: bool, page_size: int, do_extract: bool
+) -> None:
+    """List clank.world stories/characters (newest-first by default).
+
+    Pages the public browse feed and prints the character, tags, chat count, and
+    a chat/character URL you can pass to [bold]rip clank extract[/]. With
+    [bold]--extract[/] each is also saved as a partial card (public data only).
+    """
+    if not ck.has_session():
+        _no("no clank.world session - run [bold]rip clank login[/] first")
+        sys.exit(1)
+    try:
+        items = list(
+            ck.iter_stories(
+                sort=sort,
+                limit=limit,
+                page_size=page_size,
+                tags=list(tags) or None,
+                include_nsfw=nsfw,
+            )
+        )
+    except ck.ClankError as exc:
+        _no(str(exc))
+        sys.exit(1)
+
+    if not items:
+        _no("no stories returned")
+        return
+
+    table = Table(box=None, pad_edge=False, show_edge=False)
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("character", style="bold")
+    table.add_column("created", style="cyan")
+    table.add_column("chats", justify="right")
+    table.add_column("tags", style="dim")
+    table.add_column("character url")
+    for i, it in enumerate(items, 1):
+        created = str(it.get("created_at") or "")[:10]
+        tag_list = it.get("tags") if isinstance(it.get("tags"), list) else []
+        nsfw_mark = " [red]nsfw[/]" if it.get("is_nsfw") else ""
+        table.add_row(
+            str(i),
+            (str(it.get("agent_name") or "?")[:34]) + nsfw_mark,
+            created,
+            str(it.get("total_chats") or "0"),
+            ", ".join(tag_list[:4]),
+            ck.story_character_url(it),
+        )
+    console.print(table)
+    _field("listed", f"{len(items)} stories (sort={sort})")
+
+    if do_extract:
+        library_dir = OUT / "library"
+        saved = 0
+        for it in items:
+            try:
+                result = ck.extract_story(it)
+                save_to_library(library_dir, result.get("characterId") or "", result)
+                saved += 1
+            except ck.ClankError as exc:
+                err_console.print(f"[yellow]![/] {it.get('agent_name')}: {exc}")
+        _ok(f"saved [bold]{saved}[/] partial card(s) to {library_dir} [dim](clank-partial)[/]")
+
+
+@clank.command("extract")
+@click.argument("url", metavar="URL_OR_UUID")
+@click.option(
+    "--leak",
+    is_flag=True,
+    default=False,
+    help="If the chat has no echoed reply yet, auto-configure the echo proxy and "
+    "send a message to force one, then restore the original provider. Needs the "
+    "csrf token (see [bold]rip clank login[/]).",
+)
+@click.option(
+    "--keep-boilerplate",
+    is_flag=True,
+    default=False,
+    help="Keep the generic clank RP/formatting instructions in the card's creator notes.",
+)
+@click.option(
+    "--trigger-message",
+    metavar="TEXT",
+    default="hi",
+    show_default=True,
+    help="[--leak] The throwaway message sent to trigger a generation.",
+)
+@click.option(
+    "--lorebook",
+    is_flag=True,
+    default=False,
+    help="After leaking the definition, fire the character's lorebook by sending "
+    "trigger messages built from its own text (description/scenario/greeting) and "
+    "diffing the expanded echoes. Best on a FRESH chat (memory accumulates otherwise).",
+)
+@click.option(
+    "--max-triggers",
+    type=int,
+    default=8,
+    show_default=True,
+    metavar="N",
+    help="[--lorebook] Cap the number of trigger messages sent (each is a slow generation).",
+)
+@verbose_option
+def clank_extract(
+    url: str,
+    leak: bool,
+    keep_boilerplate: bool,
+    trigger_message: str,
+    lorebook: bool,
+    max_triggers: int,
+    verbose: int,
+) -> None:
+    """Rip a clank.world character card from a chat or character URL.
+
+    URL can be a [cyan]clank.world/chat/<uuid>[/] chat URL, a bare chat UUID, or
+    a [cyan]clank.world/@<slug>[/] character page — the latter is resolved to your
+    existing chat with that character (open one and send a message first).
+    """
+    _clank_extract(
+        url,
+        leak=leak,
+        keep_boilerplate=keep_boilerplate,
+        trigger_message=trigger_message,
+        with_lorebook=lorebook,
+        max_triggers=max_triggers,
+        verbose=verbose,
+    )
+
+
+def _clank_extract(
+    url: str,
+    *,
+    leak: bool = False,
+    keep_boilerplate: bool = False,
+    trigger_message: str = "hi",
+    with_lorebook: bool = False,
+    max_triggers: int = 8,
+    verbose: int = 0,
+) -> None:
+    """Shared implementation for [rip clank extract] and [rip extract <clank url>]."""
+    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
+    ck.set_trace_level(verbose)
+    started = time.monotonic()
+    try:
+        result = ck.extract_chat(
+            url,
+            leak=leak,
+            keep_boilerplate=keep_boilerplate,
+            trigger_message=trigger_message,
+            with_lorebook=with_lorebook,
+            max_triggers=max_triggers,
+            log=log,
+        )
+    except ck.ClankError as exc:
+        _no(str(exc))
+        if exc.status == 401:
+            err_console.print("[dim]run [bold]rip clank login[/] to authenticate[/]")
+        raise SystemExit(1)
+    finally:
+        ck.set_trace_level(0)
+    elapsed = time.monotonic() - started
+
+    library_dir = OUT / "library"
+    paths = save_to_library(library_dir, result.get("characterId") or "", result)
+
+    leak_raw = result.get("leakRaw") or ""
+    leak_path = None
+    if leak_raw:
+        leak_path = library_dir / f"{result.get('characterId') or 'card'}.leak.txt"
+        leak_path.write_text(leak_raw, encoding="utf-8")
+
+    _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](clank)[/]")
+    _path("card png", paths["png"])
+    if leak_path is not None:
+        _path("raw leak", leak_path)
+
+    character = result.get("character") or {}
+    diagnostics = result.get("diagnostics") or {}
+    source = character.get("definitionSource")
+    if source == "clank-echo-leak":
+        _field(
+            "definition",
+            f"[green]leaked {diagnostics.get('definitionChars', 0)} chars verbatim via echo proxy[/]",
+        )
+    elif diagnostics.get("leakError"):
+        _field("definition", f"[yellow]not leaked: {diagnostics['leakError']}[/]")
+    else:
+        _field(
+            "definition",
+            "[yellow]partial - no echo in chat; configure the proxy + send a message, or use --leak[/]",
+        )
+    greetings = (1 if character.get("firstMessage") else 0) + len(character.get("alternateGreetings") or [])
+    _field("greetings", greetings)
+    _field("scenario", f"{diagnostics.get('scenarioChars', 0)} chars")
+    _field("example dialogue", f"{diagnostics.get('exampleChars', 0)} chars")
+    tags = diagnostics.get("tags") or []
+    if tags:
+        _field("tags", ", ".join(tags))
+    if with_lorebook:
+        if "lorebookEntries" in diagnostics:
+            n = diagnostics["lorebookEntries"]
+            _field(
+                "lorebook",
+                f"[green]{n} entr{'y' if n == 1 else 'ies'} recovered via triggers[/]"
+                if n else "no lorebook entries fired (character may have none)",
+            )
+        elif diagnostics.get("lorebookError"):
+            _field("lorebook", f"[yellow]not run: {diagnostics['lorebookError']}[/]")
+    _field("time", _fmt_duration(elapsed))
 
 
 # --------------------------------------------------------------------------- #

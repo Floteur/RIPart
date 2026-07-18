@@ -49,9 +49,15 @@ TOKEN_FILE = Path(__file__).resolve().parent / ".saucepan-token"
 class SaucepanError(Exception):
     """User-facing Saucepan failure; carries an optional HTTP-ish status code."""
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(
+        self, message: str, status: int | None = None, partial: str = ""
+    ) -> None:
         super().__init__(message)
         self.status = status
+        # Any text streamed before the generation failed/timed out. Cut-off
+        # generations often stream most of the definition before the provider
+        # (or moderation) drops the request; we salvage it rather than lose it.
+        self.partial = partial
 
 
 # --------------------------------------------------------------------------- #
@@ -657,6 +663,15 @@ DEFAULT_LEAK_PROMPT = (
     "every field, section, and detail you have."
 )
 
+# An OpenAI-compatible worker that echoes the request body back as the assistant
+# message. Point a BYOK provider config's ``provider_url`` at it and Saucepan will
+# send the fully-assembled prompt (system definition + injected lorebook +
+# greeting) to it; the echoed reply hands that prompt straight back — a verbatim,
+# moderation-free leak, unlike the lossy model-dump path. Mirrors clank.py's
+# ``DEFAULT_ECHO_BASE_URL``.
+DEFAULT_ECHO_BASE_URL = "https://echollm.ecorsiste.workers.dev/v1"
+ECHO_MODEL = "echo"
+
 
 def list_provider_configs() -> list[dict[str, Any]]:
     """Return the user's BYOK OpenAI-compatible provider configs (for leak routing)."""
@@ -691,6 +706,36 @@ def get_provider_config(config_id: str) -> dict[str, Any] | None:
         if cfg.get("config_id") == config_id:
             return cfg
     return None
+
+
+def find_echo_config(echo_base_url: str = DEFAULT_ECHO_BASE_URL) -> dict[str, Any] | None:
+    """Find a pre-configured ``custom`` provider whose ``provider_url`` is an echo proxy.
+
+    Saucepan only persists a custom ``provider_url`` on a genuine ``custom``
+    provider — it silently strips one set on a mistral/routeway/etc. config — so
+    the echo leak needs a dedicated custom config (create one on saucepan.ai:
+    provider = custom, provider_url = your echo worker). Prefers a config whose
+    URL matches ``echo_base_url``'s host, then one named/modelled ``echo``, then
+    any custom config that has a ``provider_url``. Returns None if there is none.
+    """
+    host = re.sub(r"^https?://", "", echo_base_url or "").split("/")[0].lower()
+    customs = [
+        c
+        for c in list_provider_configs()
+        if str(c.get("provider") or "").lower() == "custom" and c.get("provider_url")
+    ]
+    if not customs:
+        return None
+    for cfg in customs:
+        if host and host in str(cfg.get("provider_url") or "").lower():
+            return cfg
+    for cfg in customs:
+        if (
+            str(cfg.get("model_id") or "").lower() == ECHO_MODEL
+            or "echo" in str(cfg.get("config_name") or "").lower()
+        ):
+            return cfg
+    return customs[0]
 
 
 def update_provider_config(config_id: str, **fields: Any) -> dict[str, Any]:
@@ -803,6 +848,7 @@ def _run_generation(
 
     deadline = time.monotonic() + timeout
     polls = 0
+    best_partial = ""
     while time.monotonic() < deadline:
         _pok, _pstatus, poll = _get_json(
             f"/api/v2/chat/generation/{quote(str(generation_id), safe='')}/poll",
@@ -811,6 +857,12 @@ def _run_generation(
         poll = poll if isinstance(poll, dict) else {}
         state = poll.get("status") or poll.get("state")
         polls += 1
+        # Buffer the longest streamed_text seen so far. The model streams the
+        # reply incrementally during "generating"; if the generation later fails
+        # this is all we get to keep.
+        stream = poll.get("streamed_text")
+        if isinstance(stream, str) and len(stream) > len(best_partial):
+            best_partial = stream
         if state == "completed":
             result = poll.get("result") if isinstance(poll.get("result"), dict) else {}
             breakdown = result.get("context_breakdown")
@@ -828,9 +880,16 @@ def _run_generation(
             else:
                 reason = str(err or poll.get("message") or result.get("message") or "")
             log(f"terminal status={state}: {json.dumps(poll)[:400]}")
-            raise SaucepanError(f"generation {state}" + (f": {reason}" if reason else ""))
+            if best_partial:
+                log(f"kept {len(best_partial)} chars streamed before failure")
+            raise SaucepanError(
+                f"generation {state}" + (f": {reason}" if reason else ""),
+                partial=best_partial,
+            )
         time.sleep(2)
-    raise SaucepanError("generation timed out")
+    if best_partial:
+        log(f"kept {len(best_partial)} chars streamed before timeout")
+    raise SaucepanError("generation timed out", partial=best_partial)
 
 
 def leak_definition(
@@ -864,6 +923,7 @@ def leak_definition(
 
     total = max(1, attempts)
     last_error: Exception | None = None
+    best_partial = ""
     for attempt in range(1, total + 1):
         chat_id = None
         try:
@@ -904,10 +964,276 @@ def leak_definition(
         except SaucepanError as exc:
             log(f"-> {exc}")
             last_error = exc
+            partial = getattr(exc, "partial", "") or ""
+            if len(partial) > len(best_partial):
+                best_partial = partial
+                log(f"-> buffered {len(partial)}-char partial stream as fallback")
         finally:
             if chat_id:
                 archive_chat(chat_id)
+
+    # Every attempt failed to return a clean full dump. If a cut-off generation
+    # streamed a usable chunk before failing, salvage the longest one rather than
+    # losing the leak entirely.
+    if best_partial.strip() and (accept_any or _looks_like_definition(best_partial)):
+        log(
+            f"all attempts failed; returning best partial stream "
+            f"({len(best_partial)} chars)"
+        )
+        return best_partial
     raise last_error or SaucepanError("leak failed")
+
+
+# --------------------------------------------------------------------------- #
+# Echo-proxy leak — recover the definition verbatim via a custom provider_url.
+#
+# Instead of asking a model to *describe* its instructions (lossy, moderated,
+# often cut off), we point a BYOK config's provider_url at an echo worker. When
+# Saucepan runs a generation through that config it POSTs the fully-assembled
+# prompt to the worker, which reflects the request body straight back as the
+# assistant reply. That body's system/developer message is the verbatim
+# character definition + injected lorebook; the assistant turns are the
+# greetings. No moderation, no paraphrase.
+# --------------------------------------------------------------------------- #
+
+
+def _find_echo_body(text: str) -> dict[str, Any] | None:
+    """Parse an echoed OpenAI request body out of a generation reply.
+
+    The echo worker returns the JSON request body Saucepan sent it
+    (``{"model", "messages": [...]}``) as the assistant content. The reply may
+    be that JSON directly, or fenced/prefixed; we locate the outermost object
+    that carries a ``messages`` array.
+    """
+    if not isinstance(text, str) or '"messages"' not in text:
+        return None
+    stripped = _strip_code_fence(text).strip()
+    candidates = [stripped]
+    # Fall back to the first '{' … matching brace span if there's surrounding prose.
+    start = stripped.find("{")
+    if start > 0:
+        candidates.append(stripped[start:])
+    for cand in candidates:
+        try:
+            body = json.loads(cand)
+        except ValueError:
+            continue
+        if isinstance(body, dict) and isinstance(body.get("messages"), list):
+            return body
+    return None
+
+
+def _echo_system_text(body: dict[str, Any]) -> str:
+    """Concatenate all system/developer message contents from an echoed body.
+
+    This is the fully-assembled prompt: character definition, personality,
+    scenario, example dialogue, and any injected lorebook entries — verbatim.
+    """
+    parts: list[str] = []
+    for msg in body.get("messages") or []:
+        if isinstance(msg, dict) and msg.get("role") in ("system", "developer"):
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                parts.append(content.strip())
+    return "\n\n".join(parts).strip()
+
+
+def _echo_greetings(body: dict[str, Any]) -> list[str]:
+    """Assistant turns in the echoed prompt = the character's greeting(s)."""
+    out: list[str] = []
+    for msg in body.get("messages") or []:
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            content = msg.get("content")
+            if isinstance(content, str) and content.strip():
+                out.append(content.strip())
+    return out
+
+
+def cancel_generation(chat_id: str, generation_id: str) -> dict[str, Any]:
+    """Cancel/commit a generation and return its committed messages.
+
+    For the echo leak this is the reliable retrieval path: the echo streams into
+    the reply, Saucepan marks the generation ``failed`` (it can't parse the echo
+    as a completion), but ``cancel`` returns the committed messages — the last of
+    which is the companion turn whose content is the echoed request body.
+    """
+    ok, _status, data = _post_json(
+        "/api/v2/chat/cancel", {"chat_id": chat_id, "generation_id": generation_id}
+    )
+    return data if ok and isinstance(data, dict) else {}
+
+
+def _echo_from_messages(messages: list[Any]) -> dict[str, Any] | None:
+    """Find the echoed request body in a list of committed chat messages."""
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get("role") in ("companion", "assistant"):
+            body = _find_echo_body(str(msg.get("content") or ""))
+            if body is not None:
+                return body
+    return None
+
+
+def _run_echo_generation(
+    chat_id: str,
+    companion_id: str,
+    config_id: str,
+    *,
+    mode: str,
+    timeout: int,
+    log: Callable[[str], None] = _noop,
+) -> dict[str, Any] | None:
+    """Fire one echo generation and return the parsed echo body (or None).
+
+    Polls to a terminal state (never cancelling mid-flight — an early cancel
+    aborts the stream before the echo lands), capturing ``streamed_text``. Uses
+    that if it carries the echo; otherwise falls back to one ``cancel`` call,
+    which returns the committed companion message (the browser's own path).
+    """
+    ok, status, data = _post_json(
+        "/api/v2/chat/generate",
+        {
+            "chat_id": chat_id,
+            "content": "hi",
+            "active_companion_id": companion_id,
+            "mode": mode,
+            "generation_config": {"openaiprovider": {"config_id": config_id}},
+        },
+    )
+    if not ok or not isinstance(data, dict) or not data.get("generation_id"):
+        message = (data.get("error") or {}).get("message") if isinstance(data, dict) else None
+        raise SaucepanError(message or f"generation request failed (HTTP {status})", status)
+    generation_id = data["generation_id"]
+    log(f"echo generation {generation_id} queued")
+
+    best = ""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _pok, _ps, poll = _get_json(
+            f"/api/v2/chat/generation/{quote(str(generation_id), safe='')}/poll", True
+        )
+        poll = poll if isinstance(poll, dict) else {}
+        stream = poll.get("streamed_text")
+        if isinstance(stream, str) and len(stream) > len(best):
+            best = stream
+        state = poll.get("status") or poll.get("state")
+        if state in ("completed", "failed", "error", "cancelled", "canceled"):
+            log(f"echo generation terminal: {state}")
+            break
+        time.sleep(1.5)
+
+    body = _find_echo_body(best)
+    if body is not None:
+        log(f"echo via streamed_text ({len(best)} chars)")
+        return body
+    # Fallback: the browser retrieves the committed echo via cancel.
+    log("fetching committed echo via cancel …")
+    committed = cancel_generation(chat_id, generation_id)
+    body = _echo_from_messages(committed.get("messages") or [])
+    if body is not None:
+        log("echo via cancel (committed messages)")
+    return body
+
+
+def leak_definition_via_echo(
+    url: str,
+    *,
+    provider_config_id: str | None = None,
+    echo_base_url: str = DEFAULT_ECHO_BASE_URL,
+    mode: str = "user",
+    timeout: int = 120,
+    log: Callable[[str], None] = _noop,
+) -> dict[str, Any]:
+    """Leak a companion's definition verbatim through an echo proxy.
+
+    Prefers a pre-configured ``custom`` provider whose ``provider_url`` is an echo
+    worker (see :func:`find_echo_config`) and uses it **as-is** — Saucepan only
+    persists a custom URL on a genuine ``custom`` provider, so hijacking a
+    mistral/etc. config is silently stripped. If no such config exists, falls back
+    to temporarily repointing ``provider_config_id`` (restored afterwards) for
+    accounts that do allow it.
+
+    Returns ``{"definition", "greetings", "raw", "body"}``. Raises SaucepanError
+    if no echo config is available or no echo came back.
+    """
+    if not has_token():
+        raise SaucepanError(
+            "no Saucepan token configured - run `rip saucepan login` first", 401
+        )
+    companion_id = parse_companion_id(url)
+    if not companion_id:
+        raise SaucepanError("not a Saucepan companion URL", 400)
+
+    echo_cfg = find_echo_config(echo_base_url)
+    hijack = False
+    restore_url = restore_model = None
+    if echo_cfg:
+        config_id = echo_cfg["config_id"]
+        log(
+            f"using custom echo provider '{echo_cfg.get('config_name')}' "
+            f"({config_id}) -> {echo_cfg.get('provider_url')}"
+        )
+    else:
+        # Fallback: repoint the given config at the echo proxy (restored later).
+        if not provider_config_id:
+            raise SaucepanError(
+                "no custom echo provider config found. On saucepan.ai create a "
+                "provider with provider = custom and provider_url = your echo worker "
+                f"(e.g. {echo_base_url}), then retry."
+            )
+        original = get_provider_config(provider_config_id)
+        if not original:
+            raise SaucepanError(f"provider config {provider_config_id} not found")
+        config_id = provider_config_id
+        restore_url = original.get("provider_url")
+        restore_model = original.get("model_id")
+        hijack = True
+        log(f"pointing provider config at echo proxy ({echo_base_url}) …")
+        update_provider_config(config_id, provider_url=echo_base_url, model_id=ECHO_MODEL)
+        refreshed = get_provider_config(config_id) or {}
+        if (refreshed.get("provider_url") or "").rstrip("/") != echo_base_url.rstrip("/"):
+            update_provider_config(
+                config_id, provider_url=restore_url, model_id=restore_model
+            )
+            raise SaucepanError(
+                "Saucepan stripped the custom provider_url from this config — it "
+                "only persists on a 'custom' provider. Create a custom echo provider "
+                "config instead. Falling back to the model dump."
+            )
+
+    chat_id: str | None = None
+    try:
+        chat_id = create_chat(companion_id)
+        body = _run_echo_generation(
+            chat_id, companion_id, config_id, mode=mode, timeout=timeout, log=log
+        )
+        if body is None:
+            raise SaucepanError(
+                "no echo body came back — the echo proxy may not have streamed the "
+                "request (check the config's provider_url points at your echo worker)"
+            )
+        definition = _echo_system_text(body)
+        greetings = _echo_greetings(body)
+        if not definition:
+            raise SaucepanError("echo body had no system/developer message to leak")
+        raw = json.dumps(body, ensure_ascii=False)
+        log(f"echo leak: {len(definition)} chars of definition, {len(greetings)} greeting(s)")
+        return {
+            "definition": definition,
+            "greetings": greetings,
+            "raw": raw,
+            "body": body,
+        }
+    finally:
+        if hijack:
+            try:
+                update_provider_config(
+                    config_id, provider_url=restore_url, model_id=restore_model
+                )
+                log("restored original provider_url")
+            except SaucepanError:
+                log("! could not restore provider_url — check the config in Saucepan settings")
+        if chat_id:
+            archive_chat(chat_id)
 
 
 _REFUSAL_MARKERS = (
@@ -1012,6 +1338,97 @@ def _apply_leak(character: dict[str, Any], leaked: str) -> None:
     character["reconstruction"] = {"method": "saucepan-chat-leak", "chars": len(text)}
 
 
+# Top-level ``[ Title ]`` section headers in an assembled prompt (space-padded,
+# on their own line): ``[ Critical Instructions ]``, ``[ Background ]``,
+# ``[ Example Dialogue ]``, ``[ User Description ]``, ``[ Lore ]``, etc.
+_ECHO_SECTION = re.compile(r"(?m)^[ \t]*\[[ \t]+([A-Za-z][^\]\n]{1,48}?)[ \t]+\]\s*$")
+
+
+def _classify_echo_section(title: str) -> str:
+    t = title.lower()
+    if re.search(r"example\s+(?:dialogue|messages?)|dialogue\s+examples?", t):
+        return "example"
+    if re.match(r"lore|world\s*info|lorebook", t):
+        return "lore"
+    if "user description" in t or t.strip() in ("user", "persona"):
+        return "user"
+    return "desc"
+
+
+def _split_echo_definition(text: str) -> dict[str, str]:
+    """Carve an assembled prompt into ``description`` / ``example`` / ``lore``.
+
+    Splits on top-level ``[ Title ]`` headers and routes each section: example
+    dialogue → ``example``, the (often gated) lorebook block → ``lore``, the
+    user-persona block is dropped, and everything else (intro + rules +
+    background) stays in ``description``. Nothing is discarded — unlike the old
+    example-only split, which lost every section after the example dialogue.
+    """
+    heads = list(_ECHO_SECTION.finditer(text or ""))
+    if not heads:
+        definition, example = _split_example_section(text or "")
+        return {"description": definition, "example": example, "lore": ""}
+
+    preamble = (text[: heads[0].start()]).strip()
+    desc: list[str] = [preamble] if preamble else []
+    example: list[str] = []
+    lore: list[str] = []
+    for i, m in enumerate(heads):
+        start, end = m.end(), (heads[i + 1].start() if i + 1 < len(heads) else len(text))
+        content = text[start:end].strip()
+        kind = _classify_echo_section(m.group(1))
+        if kind == "example":
+            example.append(content)
+        elif kind == "lore":
+            lore.append(content)
+        elif kind == "user":
+            continue  # the user-persona block is not part of the card
+        else:
+            header = m.group(0).strip()
+            desc.append(f"{header}\n{content}" if content else header)
+    return {
+        "description": "\n\n".join(p for p in desc if p).strip(),
+        "example": "\n\n".join(p for p in example if p).strip(),
+        "lore": "\n\n".join(p for p in lore if p).strip(),
+    }
+
+
+def _apply_echo_leak(character: dict[str, Any], echo: dict[str, Any]) -> None:
+    """Merge a verbatim echo-proxy leak into a character dict (in place).
+
+    Unlike :func:`_apply_leak` this is the exact assembled prompt, so we mark it
+    as a verbatim source, route its labelled sections (description / example
+    dialogue / lore), and preserve the greetings the echo exposed. The ``[ Lore ]``
+    block — the companion's lorebook, injected into the prompt even when the
+    ``/lorebooks`` API gates it — is kept in ``lorebookText`` and labelled in
+    creator notes so it is never dropped.
+    """
+    parts = _split_echo_definition(echo.get("definition") or "")
+    character["description"] = parts["description"]
+    if parts["example"]:
+        character["exampleMessages"] = parts["example"]
+    if parts["lore"]:
+        character["lorebookText"] = parts["lore"]
+        notes = str(character.get("creatorNotes") or "").strip()
+        character["creatorNotes"] = (
+            (notes + "\n\n" if notes else "")
+            + "--- Lorebook (leaked via echo) ---\n"
+            + parts["lore"]
+        ).strip()
+    greetings = [g for g in (echo.get("greetings") or []) if str(g).strip()]
+    if greetings:
+        character["firstMessage"] = greetings[0]
+        if len(greetings) > 1:
+            character["alternateGreetings"] = greetings[1:]
+    character["definitionSource"] = "saucepan-echo"
+    character["reconstruction"] = {
+        "method": "saucepan-echo-proxy",
+        "chars": len(echo.get("definition") or ""),
+        "loreChars": len(parts["lore"]),
+        "verbatim": True,
+    }
+
+
 def extract_companion(
     url: str,
     *,
@@ -1022,6 +1439,7 @@ def extract_companion(
     leak_mode: str = "user",
     leak_prompt: str | None = None,
     leak_keep: bool = False,
+    leak_echo: bool = False,
     leak_timeout: int = 180,
     log: Callable[[str], None] = _noop,
 ) -> dict[str, Any]:
@@ -1164,24 +1582,48 @@ def extract_companion(
     leak_chars = 0
     leak_error = ""
     leak_raw = ""
+    leak_method = ""
     if leak:
-        try:
-            leaked = leak_definition(
-                url,
-                provider_config_id=leak_config,
-                model_alias=leak_model,
-                mode=leak_mode,
-                prompt=leak_prompt or DEFAULT_LEAK_PROMPT,
-                timeout=leak_timeout,
-                accept_any=leak_keep,
-                log=log,
-            )
-            _apply_leak(character, leaked)
-            leak_raw = _strip_code_fence(leaked)
-            leak_chars = len(leak_raw)
-        except SaucepanError as exc:
-            # Non-fatal: keep the public-data card; report why the leak failed.
-            leak_error = str(exc)
+        # Preferred path: verbatim echo-proxy leak (needs a BYOK config with a
+        # custom provider_url). Falls back to the lossy model dump if the proxy
+        # isn't allowed or fails.
+        if leak_echo:
+            try:
+                echo = leak_definition_via_echo(
+                    url,
+                    provider_config_id=leak_config,
+                    mode=leak_mode,
+                    timeout=leak_timeout,
+                    log=log,
+                )
+                _apply_echo_leak(character, echo)
+                leak_raw = echo.get("raw") or echo.get("definition") or ""
+                leak_chars = len(echo.get("definition") or "")
+                leak_method = "echo"
+            except SaucepanError as exc:
+                leak_error = str(exc)
+                log(f"echo leak unavailable: {exc}")
+
+        if not leak_method:
+            try:
+                leaked = leak_definition(
+                    url,
+                    provider_config_id=leak_config,
+                    model_alias=leak_model,
+                    mode=leak_mode,
+                    prompt=leak_prompt or DEFAULT_LEAK_PROMPT,
+                    timeout=leak_timeout,
+                    accept_any=leak_keep,
+                    log=log,
+                )
+                _apply_leak(character, leaked)
+                leak_raw = _strip_code_fence(leaked)
+                leak_chars = len(leak_raw)
+                leak_method = "model"
+                leak_error = ""
+            except SaucepanError as exc:
+                # Non-fatal: keep the public-data card; report why the leak failed.
+                leak_error = str(exc)
 
     return {
         "url": url
@@ -1208,5 +1650,6 @@ def extract_companion(
             ),
             "leakChars": leak_chars,
             "leakError": leak_error,
+            "leakMethod": leak_method,
         },
     }

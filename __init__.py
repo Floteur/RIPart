@@ -1,4 +1,4 @@
-"""RIPart — rip characters & lorebooks from JanitorAI and Saucepan.
+"""RIPart — rip characters & lorebooks from JanitorAI, Saucepan, and clank.world.
 
 Use it as a library:
 
@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from .api import (
     DEFAULT_OUTPUT_DIR,
+    ClankError,
     SaucepanError,
+    clank,
     extract,
     import_session,
     inspect,
@@ -35,8 +37,10 @@ except PackageNotFoundError:  # pragma: no cover - running from a source tree
 
 __all__ = [
     "DEFAULT_OUTPUT_DIR",
+    "ClankError",
     "SaucepanError",
     "__version__",
+    "clank",
     "extract",
     "import_session",
     "inspect",

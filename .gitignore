@@ -25,6 +25,9 @@ output/
 # Saucepan bearer token (secret; never commit or share).
 .saucepan-token
 
+# clank.world session cookies (secret; never commit or share).
+.clank-session.json
+
 # Multi-account credential database for leak_bench (handles/passwords/tokens).
 # The *.example.json template is safe to commit; a real accounts file is not.
 accounts.json
