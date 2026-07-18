@@ -15,7 +15,7 @@ Import this in your own scripts instead of shelling out to the ``rip`` CLI:
 Every function returns a plain ``dict`` (the same shape the CLI prints), so the
 data is easy to inspect, serialise, or feed into ``save()`` yourself. Saucepan
 companion URLs are handled transparently by :func:`extract`; the lower-level
-Saucepan helpers live under ``ripart.saucepan``.
+Saucepan helpers live under ``ripart.providers.saucepan``.
 
 The browser-driven calls (:func:`login`, :func:`extract`, :func:`recent`,
 :func:`inspect`, :func:`import_session`, :func:`is_logged_in`) run a real,
@@ -28,8 +28,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable
 
-from . import clank, saucepan
-from .browser_tasks import (
+from .common.cards import save_to_library
+from .providers import clank, saucepan
+from .providers.clank import ClankError
+from .providers.janitor import (
     extract_task,
     import_session_task,
     inspect_task,
@@ -37,9 +39,7 @@ from .browser_tasks import (
     recent_task,
     status_task,
 )
-from .clank import ClankError
-from .helpers import save_to_library
-from .saucepan import SaucepanError
+from .providers.saucepan import SaucepanError
 
 __all__ = [
     "DEFAULT_OUTPUT_DIR",

@@ -8,7 +8,7 @@ Use it as a library:
     >>> result["savedPath"]
 
 or as a CLI (``rip --help`` / ``python -m ripart``). See :mod:`ripart.api` for
-the full high-level API, and ``ripart.saucepan`` for lower-level Saucepan calls.
+the full high-level API, and ``ripart.providers.saucepan`` for lower-level calls.
 """
 
 from __future__ import annotations

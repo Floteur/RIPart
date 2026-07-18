@@ -88,7 +88,7 @@ from pathlib import Path
 
 # Import the project's saucepan module (repo root is this file's parent's parent).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-from ripart import saucepan as sp  # noqa: E402
+from ripart.providers import saucepan as sp  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

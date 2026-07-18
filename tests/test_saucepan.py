@@ -1,4 +1,4 @@
-"""Unit tests for the pure (network-free) parts of ``ripart.saucepan``.
+"""Unit tests for the pure (network-free) parts of ``ripart.providers.saucepan``.
 
 These cover the fragile bits: the fragment-reassembly scheme, the lorebook
 entry parsing, the definition-leak detection/merge, and the small parsers
@@ -14,7 +14,7 @@ from __future__ import annotations
 import base64
 import json
 
-from ripart import saucepan as sp
+from ripart.providers import saucepan as sp
 
 
 # --------------------------------------------------------------------------- #

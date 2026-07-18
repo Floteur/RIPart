@@ -19,13 +19,13 @@ from botasaurus.browser import browser
 from botasaurus_driver import cdp
 from botasaurus_driver.cdp.network import CookieParam, CookieSameSite, TimeSinceEpoch
 
-from .helpers import (
+from ...common.cards import build_world_info
+from ...common.text import html_to_text
+from .payloads import (
     ORIGIN,
     build_character,
     build_lorebook_trigger_messages,
-    build_world_info,
     extract_card,
-    html_to_text,
     is_card_public,
     merge_separated_results,
     parse_character_id,
@@ -34,12 +34,12 @@ from .helpers import (
 )
 
 
-PROFILE = str(Path(__file__).resolve().parent / ".rip-botasaurus-profile")
+PROFILE = str(Path(__file__).resolve().parents[2] / ".rip-botasaurus-profile")
 # A fresh, importable snapshot of the logged-in cookies. Every logged-in run
 # rewrites it, so it tracks the auto-refreshed auth token and is always ready
 # for `rip import-session` if the browser profile is ever wiped. Lives in the
 # package dir (next to the code), which is where sessions are exported/imported.
-SESSION_FILE = str(Path(__file__).resolve().parent / ".janitor-session.json")
+SESSION_FILE = str(Path(__file__).resolve().parents[2] / ".janitor-session.json")
 PROFILE_URL = f"{ORIGIN}/hampter/profiles/mine"
 PERSONAS_URL = f"{ORIGIN}/hampter/personas"
 PERSONAS_LIST_URL = f"{ORIGIN}/hampter/personas/mine"

@@ -1,0 +1,92 @@
+"""Persisted credentials with a per-thread override.
+
+Both providers persist a credential (a Saucepan bearer token, a clank session
+cookie set) to a gitignored, owner-only file next to the code and reuse it for
+every call, with a ``threading.local`` override so several accounts can drive one
+process concurrently (each worker thread carries its own credential). The value
+type differs — a plain string vs a dict — so :class:`CredentialStore` is
+parameterised by ``loads``/``dumps`` (raw text for a token, JSON for a session).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from collections.abc import Callable
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+
+class CredentialStore:
+    """A file-persisted credential with an in-memory cache and thread override."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        empty: Any,
+        loads: Callable[[str], Any] = lambda s: s.strip(),
+        dumps: Callable[[Any], str] = lambda v: str(v),
+    ) -> None:
+        self._path = Path(path)
+        self._empty = empty
+        self._loads = loads
+        self._dumps = dumps
+        self._value: Any = None  # None = not yet loaded from disk
+        self._override = threading.local()
+
+    def active(self) -> Any:
+        """The credential for the calling thread: its override, else the global."""
+        override = getattr(self._override, "value", None)
+        return override if override else self.load()
+
+    @contextmanager
+    def use(self, value: Any):
+        """Run a block with ``value`` as the active credential for this thread only.
+
+        Nesting is supported (the previous value is restored on exit). A falsy
+        value falls back to the global credential for the duration of the block.
+        """
+        prev = getattr(self._override, "value", None)
+        self._override.value = value
+        try:
+            yield
+        finally:
+            self._override.value = prev
+
+    def load(self) -> Any:
+        """Read the persisted credential into memory (called on first use)."""
+        if self._value is None:
+            if self._path.exists():
+                # Tighten perms on an existing (possibly world-readable) file.
+                try:
+                    if (self._path.stat().st_mode & 0o077) != 0:
+                        os.chmod(self._path, 0o600)
+                except OSError:
+                    pass
+                try:
+                    self._value = self._loads(
+                        self._path.read_text(encoding="utf-8").strip()
+                    )
+                except (ValueError, OSError):
+                    self._value = self._empty
+            else:
+                self._value = self._empty
+        return self._value
+
+    def store(self, value: Any) -> None:
+        """Store a credential both in memory and on disk (owner-only file perms)."""
+        self._value = value
+        if value:
+            self._path.write_text(self._dumps(value), encoding="utf-8")
+            try:
+                os.chmod(self._path, 0o600)
+            except OSError:
+                pass
+
+    def clear(self) -> None:
+        """Forget the credential (log out)."""
+        self._value = self._empty
+        self._path.unlink(missing_ok=True)

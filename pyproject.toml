@@ -30,7 +30,14 @@ build-backend = "setuptools.build_meta"
 # still exposing a proper `ripart` package (needed by the relative imports and
 # the `rip` entry point above).
 [tool.setuptools]
-packages = ["ripart"]
+packages = [
+    "ripart",
+    "ripart.common",
+    "ripart.providers",
+    "ripart.providers.janitor",
+    "ripart.providers.saucepan",
+    "ripart.providers.clank",
+]
 
 [tool.setuptools.package-dir]
 ripart = "."
