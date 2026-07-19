@@ -20,11 +20,12 @@ from botasaurus_driver import cdp
 from botasaurus_driver.cdp.network import CookieParam, CookieSameSite, TimeSinceEpoch
 
 from ...common.cards import build_world_info, save_to_library
-from ...common.text import html_to_text
+from ...common.text import html_to_text, norm as _norm
 from .payloads import (
     ORIGIN,
     build_character,
     build_lorebook_trigger_messages,
+    build_trigger_search_messages,
     extract_card,
     is_card_public,
     merge_separated_results,
@@ -1456,6 +1457,8 @@ def _extract_character(
     persona: dict[str, Any] | None,
     chunk_size: int,
     max_trigger_passes: int,
+    find_triggers: bool,
+    max_trigger_search_passes: int,
     settle: float,
     delete_chat_on_error: bool,
     verbose: int,
@@ -1757,6 +1760,33 @@ def _extract_character(
 
         separated = merge_separated_results(separations)
 
+        # The broad passes recover text but cannot reveal which portion of a
+        # long message activated it.  Optionally replay narrow, one-candidate
+        # prompts and retain only candidates whose fresh response injects the
+        # corresponding recovered block.
+        recovered_triggers: dict[str, list[str]] = {}
+        if find_triggers and separated["entries"]:
+            candidates = build_trigger_search_messages(separated["entries"])[
+                :max_trigger_search_passes
+            ]
+            known_entries = {
+                _norm(entry): entry for entry in separated["entries"] if _norm(entry)
+            }
+            _clog(f"testing {len(candidates)} candidate lorebook triggers")
+            for index, (candidate, trigger_text) in enumerate(candidates, 1):
+                try:
+                    payload = _generate(
+                        trigger_text, label=f"trigger-search-{index}"
+                    )
+                except Exception as exc:
+                    _clog(f"warning: trigger search {index} failed, skipping: {exc}")
+                    continue
+                found = separate(payload, card, public_contents).get("entries") or []
+                found_keys = {_norm(entry) for entry in found}
+                for entry_key in known_entries:
+                    if entry_key in found_keys:
+                        recovered_triggers.setdefault(entry_key, []).append(candidate)
+
         avatar_base64 = _await_avatar_download(driver)
         character = build_character(meta, full_payload, avatar_base64, card)
         if separated["lorebookText"]:
@@ -1774,6 +1804,7 @@ def _extract_character(
             "character": character,
             "lorebookText": separated["lorebookText"],
             "entries": separated["entries"],
+            "recoveredTriggers": recovered_triggers,
         }
         if verbose:
             result["diagnostics"] = {
@@ -1781,6 +1812,12 @@ def _extract_character(
                 "publicEntryCount": len(public_contents),
                 "triggerPasses": trigger_passes,
                 "mergedEntries": len(separated.get("entries") or []),
+                "triggerSearchPasses": (
+                    len(candidates) if find_triggers and separated["entries"] else 0
+                ),
+                "triggersFound": sum(
+                    bool(value) for value in recovered_triggers.values()
+                ),
             }
         _clog(f"capture complete ({len(separated['entries'])} lorebook entries)")
         return result
@@ -1859,6 +1896,10 @@ def extract_task(driver, data):
             persona=persona,
             chunk_size=int(data.get("trigger_chunk_size") or 2500),
             max_trigger_passes=max(1, int(data.get("max_trigger_passes") or 8)),
+            find_triggers=bool(data.get("find_triggers")),
+            max_trigger_search_passes=max(
+                1, int(data.get("max_trigger_search_passes") or 48)
+            ),
             settle=max(0.0, float(data.get("trigger_settle_ms") or 0) / 1000.0),
             delete_chat_on_error=bool(data.get("delete_chat_on_error")),
             verbose=verbose,
@@ -1947,6 +1988,10 @@ def recent_task(driver, data):
 
     chunk_size = int(data.get("trigger_chunk_size") or 2500)
     max_trigger_passes = max(1, int(data.get("max_trigger_passes") or 8))
+    find_triggers = bool(data.get("find_triggers"))
+    max_trigger_search_passes = max(
+        1, int(data.get("max_trigger_search_passes") or 48)
+    )
     settle = max(0.0, float(data.get("trigger_settle_ms") or 0) / 1000.0)
     delete_chat_on_error = bool(data.get("delete_chat_on_error"))
 
@@ -1971,6 +2016,8 @@ def recent_task(driver, data):
                 persona=persona,
                 chunk_size=chunk_size,
                 max_trigger_passes=max_trigger_passes,
+                find_triggers=find_triggers,
+                max_trigger_search_passes=max_trigger_search_passes,
                 settle=settle,
                 delete_chat_on_error=delete_chat_on_error,
                 verbose=verbose,

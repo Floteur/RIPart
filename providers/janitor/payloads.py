@@ -12,10 +12,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from stopwordsiso import stopwords
+
 from ...common.text import html_to_text, normalize_user_placeholder, split_text_chunks
 from ...common.text import norm as _norm
 
 ORIGIN = "https://janitorai.com"
+ENGLISH_STOPWORDS = stopwords(["en"])
 
 
 def parse_character_id(value: str) -> str:
@@ -219,6 +222,51 @@ def build_lorebook_trigger_messages(
         candidates.extend(split_text_chunks(example_dialogs, chunk_size))
 
     return _dedupe_trigger_messages(candidates)
+
+
+def build_trigger_search_messages(entries: list[str]) -> list[tuple[str, str]]:
+    """Return narrow candidate-key probes for recovered private lore.
+
+    These are deliberately separate from the normal broad trigger passes.  A
+    probe contains one candidate phrase only, so an entry observed in its
+    response has a useful, reproducible activation key rather than a guess
+    copied from a large card chunk.
+    """
+    candidates: list[str] = []
+    for entry in entries:
+        text = str(entry or "").strip()
+        if not text:
+            continue
+        # Headings and title-cased phrases are often author-entered lore keys.
+        for line in text.splitlines():
+            heading = line.strip().lstrip("#•*- ").rstrip(":")
+            if not heading:
+                continue
+            if heading.isupper() or re.fullmatch(
+                r"(?:[A-Z][\w'-]*)(?:\s+[A-Z][\w'-]*){1,4}", heading
+            ):
+                candidates.append(heading)
+        # Individual distinctive words cover keys such as a character or place
+        # name when the entry itself has no useful heading.
+        for word in re.findall(r"[A-Za-z][A-Za-z'-]{3,}", text):
+            if word.lower() not in ENGLISH_STOPWORDS:
+                candidates.append(word)
+
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        candidate = candidate.strip()
+        key = _norm(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            (
+                candidate,
+                f"Please tell me about {candidate}. I want the relevant context and details.",
+            )
+        )
+    return out
 
 
 def merge_separated_results(separations: list[dict[str, Any]]) -> dict[str, Any]:

@@ -291,6 +291,9 @@ rip extract <url> --headed
 # Do a single trigger pass and print diagnostics
 rip extract <url> --no-multi-trigger -v
 
+# Spend extra generations testing likely keys for recovered private lore
+rip janitor extract <url> --find-triggers --max-trigger-search-passes 48
+
 # Import a session dump on a headless box, retrying past Cloudflare
 rip import-session ./session.json --bypass-cloudflare -v
 ```

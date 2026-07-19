@@ -96,6 +96,19 @@ def test_recovered_lore_is_disabled_when_activation_is_unknown():
     assert entry["extensions"]["ripart"]["recovery"]["trigger_status"] == "unknown"
 
 
+def test_recovered_lore_with_verified_trigger_is_enabled():
+    book = build_character_book(
+        ["Private recovered content."],
+        recovered_triggers={"private recovered content.": ["Private"]},
+    )
+
+    assert book is not None
+    entry = book["entries"][0]
+    assert entry["keys"] == ["Private"]
+    assert entry["enabled"] is True
+    assert entry["extensions"]["ripart"]["recovery"]["trigger_status"] == "inferred"
+
+
 def test_v3_card_round_trip_preserves_prompt_and_v3_fields():
     source = {
         "spec": "chara_card_v3",

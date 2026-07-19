@@ -523,6 +523,20 @@ def inspect(url: str, headed: bool) -> None:
     help="Send only one full card trigger (skip the extra keyword passes).",
 )
 @click.option(
+    "--find-triggers",
+    is_flag=True,
+    default=False,
+    help="Probe recovered private lore for likely activation keys (many extra generations).",
+)
+@click.option(
+    "--max-trigger-search-passes",
+    type=int,
+    default=48,
+    show_default=True,
+    metavar="N",
+    help="[--find-triggers] Cap one-candidate trigger probes.",
+)
+@click.option(
     "--jllm-leak/--no-jllm-leak",
     default=True,
     show_default=True,
@@ -538,6 +552,8 @@ def extract(
     trigger_chunk_size: int,
     trigger_settle_ms: int,
     no_multi_trigger: bool,
+    find_triggers: bool,
+    max_trigger_search_passes: int,
     jllm_leak: bool,
     verbose: int,
     headed: bool,
@@ -587,6 +603,8 @@ def extract(
             "max_trigger_passes": 1 if no_multi_trigger else max_trigger_passes,
             "trigger_chunk_size": trigger_chunk_size,
             "trigger_settle_ms": trigger_settle_ms,
+            "find_triggers": find_triggers,
+            "max_trigger_search_passes": max_trigger_search_passes,
             "jllm_leak": jllm_leak,
         },
         **browser_kwargs(headed),
@@ -622,6 +640,9 @@ def _print_extract_diagnostics(diagnostics: dict) -> None:
     _field("public lorebook entries", diagnostics.get("publicEntryCount", 0))
     _field("trigger passes", len(diagnostics.get("triggerPasses") or []))
     _field("merged lorebook entries", diagnostics.get("mergedEntries", 0))
+    if "triggerSearchPasses" in diagnostics:
+        _field("trigger search probes", diagnostics["triggerSearchPasses"])
+        _field("entries with inferred keys", diagnostics.get("triggersFound", 0))
     for trigger_pass in diagnostics.get("triggerPasses") or []:
         console.print(
             f"    - pass {trigger_pass.get('index')}: {trigger_pass.get('chars', 0)} chars, "
@@ -685,6 +706,20 @@ def _print_extract_diagnostics(diagnostics: dict) -> None:
     help="[--extract] Send only one full card trigger per card.",
 )
 @click.option(
+    "--find-triggers",
+    is_flag=True,
+    default=False,
+    help="[--extract] Probe recovered private lore for likely activation keys (many extra generations).",
+)
+@click.option(
+    "--max-trigger-search-passes",
+    type=int,
+    default=48,
+    show_default=True,
+    metavar="N",
+    help="[--extract --find-triggers] Cap one-candidate trigger probes per card.",
+)
+@click.option(
     "--delete-chat-on-error",
     is_flag=True,
     default=False,
@@ -707,6 +742,8 @@ def recent(
     max_trigger_passes: int,
     trigger_chunk_size: int,
     no_multi_trigger: bool,
+    find_triggers: bool,
+    max_trigger_search_passes: int,
     delete_chat_on_error: bool,
     jllm_leak: bool,
     verbose: int,
@@ -744,6 +781,8 @@ def recent(
             "verbose": verbose,
             "max_trigger_passes": 1 if no_multi_trigger else max_trigger_passes,
             "trigger_chunk_size": trigger_chunk_size,
+            "find_triggers": find_triggers,
+            "max_trigger_search_passes": max_trigger_search_passes,
             "delete_chat_on_error": delete_chat_on_error,
             "jllm_leak": jllm_leak,
         },

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from ripart.common.text import normalize_sillytavern_identity_macros, normalize_user_placeholder
-from ripart.providers.janitor.payloads import build_character, separate
+from ripart.providers.janitor.payloads import (
+    build_character,
+    build_trigger_search_messages,
+    separate,
+)
 
 
 def test_normalize_user_placeholder_collapses_any_brace_count():
@@ -45,3 +49,14 @@ def test_janitor_card_and_lorebook_text_use_sillytavern_user_macro():
     assert character["firstMessage"] == "Hi, {{user}}!"
     assert character["creatorNotes"] == "Notes for {{user}}."
     assert lorebook["entries"] == ["{{user}} lore"]
+
+
+def test_trigger_search_messages_prioritize_headings_and_distinctive_words():
+    probes = build_trigger_search_messages(
+        ["NEIGHBORHOOD CORE RULES\nEvery neighborhood has a distinctive bakery."]
+    )
+
+    candidates = [candidate for candidate, _message in probes]
+    assert candidates[0] == "NEIGHBORHOOD CORE RULES"
+    assert "NEIGHBORHOOD" in candidates
+    assert all(candidate in message for candidate, message in probes)
