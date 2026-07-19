@@ -15,6 +15,8 @@ import base64
 import json
 
 from ripart.providers import saucepan as sp
+from ripart.providers.saucepan import client as saucepan_client
+from ripart.providers.saucepan import leak as saucepan_leak
 
 
 # --------------------------------------------------------------------------- #
@@ -194,6 +196,51 @@ def test_is_saucepan_url():
     assert not sp.is_saucepan_url("https://janitorai.com/x")
 
 
+def test_search_companions_posts_catalogue_filters():
+    captured = {}
+    original_has_token, original_post_json = saucepan_client.has_token, saucepan_client._post_json
+    try:
+        saucepan_client.has_token = lambda: True
+
+        def fake_post_json(path, body, with_auth=True):
+            captured["path"] = path
+            captured["body"] = body
+            captured["with_auth"] = with_auth
+            return True, 200, {"companions": [{"id": "one"}, "ignored"], "total_count": 12}
+
+        saucepan_client._post_json = fake_post_json
+        assert sp.search_companions(
+            limit=12,
+            offset=3,
+            tags=["female"],
+            excluded_tags=["male"],
+            include_nsfw=False,
+        ) == {"companions": [{"id": "one"}], "total_count": 12}
+    finally:
+        saucepan_client.has_token, saucepan_client._post_json = original_has_token, original_post_json
+    assert captured["path"] == "/api/v1/search"
+    assert captured["with_auth"] is True
+    assert captured["body"]["tags"] == ["female"]
+    assert captured["body"]["excluded_tags"] == ["male"]
+    assert captured["body"]["limit"] == 12
+    assert captured["body"]["offset"] == 3
+    assert captured["body"]["sus"] is False
+
+
+def test_search_companions_requires_token():
+    original = saucepan_client.has_token
+    try:
+        saucepan_client.has_token = lambda: False
+        try:
+            sp.search_companions()
+        except sp.SaucepanError as exc:
+            assert exc.status == 401
+        else:
+            assert False, "expected SaucepanError"
+    finally:
+        saucepan_client.has_token = original
+
+
 def test_set_provider_prompt_builds_patch_without_key():
     fake = {
         "config_id": "cfg1",
@@ -215,13 +262,13 @@ def test_set_provider_prompt_builds_patch_without_key():
         captured["body"] = json_body
         return True, 200, {}
 
-    orig_list, orig_req = sp.list_provider_configs, sp._request_json
+    orig_list, orig_req = saucepan_leak.list_provider_configs, saucepan_leak._request_json
     try:
-        sp.list_provider_configs = lambda: [fake]
-        sp._request_json = fake_request
+        saucepan_leak.list_provider_configs = lambda: [fake]
+        saucepan_leak._request_json = fake_request
         old = sp.set_provider_prompt("cfg1", "NEW SYSTEM PROMPT")
     finally:
-        sp.list_provider_configs, sp._request_json = orig_list, orig_req
+        saucepan_leak.list_provider_configs, saucepan_leak._request_json = orig_list, orig_req
 
     assert old == "OLD"  # returns previous value for restore
     assert captured["method"] == "PATCH"
@@ -234,16 +281,9 @@ def test_set_provider_prompt_builds_patch_without_key():
 
 
 def test_token_expiry(monkeypatch=None):
-    original = sp._token
-    try:
-        sp._token = _jwt(1786788031)
-        assert sp.token_expiry() == 1786788031
-        sp._token = _jwt(None)  # valid JWT, no exp claim
-        assert sp.token_expiry() is None
-        sp._token = "not-a-jwt"
-        assert sp.token_expiry() is None
-    finally:
-        sp._token = original
+    assert sp.token_expiry(_jwt(1786788031)) == 1786788031
+    assert sp.token_expiry(_jwt(None)) is None  # valid JWT, no exp claim
+    assert sp.token_expiry("not-a-jwt") is None
 
 
 # --------------------------------------------------------------------------- #

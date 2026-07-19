@@ -306,6 +306,57 @@ def _companion_creator(companion: dict[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
+def search_companions(
+    *,
+    limit: int = 30,
+    offset: int = 0,
+    tags: list[str] | None = None,
+    excluded_tags: list[str] | None = None,
+    include_nsfw: bool = True,
+) -> dict[str, Any]:
+    """Browse Saucepan's newest public companions.
+
+    The catalogue is served by the authenticated ``/api/v1/search`` endpoint.
+    Its response includes the current page in ``companions`` and, when
+    available, the total number of matching records in ``total_count``.
+    """
+    if not has_token():
+        raise SaucepanError(
+            "no Saucepan token configured - run `rip saucepan login` first", 401
+        )
+    body = {
+        "text_search": "",
+        "tags": list(tags or []),
+        "excluded_tags": list(excluded_tags or []),
+        "match_all_fandom_tags": False,
+        "limit": limit,
+        "offset": offset,
+        "sus": include_nsfw,
+        "order_by": "created",
+        "asc": False,
+        "match_all_tags": True,
+        "hide_hidden_content": True,
+        "extra_spicy": None,
+        "posted_at_from": None,
+        "posted_at_to": None,
+    }
+    ok, status, data = _post_json("/api/v1/search", body, True)
+    if not ok:
+        message = None
+        if isinstance(data, dict):
+            error = data.get("error")
+            message = error.get("message") if isinstance(error, dict) else None
+        raise SaucepanError(message or f"could not list companions (HTTP {status})", status)
+
+    items: Any = data.get("companions") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        raise SaucepanError("unexpected response while listing companions", 502)
+    return {
+        "companions": [item for item in items if isinstance(item, dict)],
+        "total_count": data.get("total_count") if isinstance(data, dict) else None,
+    }
+
+
 # Re-exported so leak/lorebook/extract can share one client instance.
 __all__ = [
     "SAUCEPAN_BASE",
@@ -322,6 +373,7 @@ __all__ = [
     "parse_companion_id",
     "set_token",
     "set_trace_level",
+    "search_companions",
     "token_expiry",
     "use_token",
 ]

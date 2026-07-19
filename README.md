@@ -144,6 +144,7 @@ reconstruction. Log in once (the bearer token is saved to a gitignored
 ```bash
 rip saucepan login                 # store a bearer token (prompts for username + password)
 rip saucepan status                # confirm a token is configured & unexpired (exit 0 = yes, 1 = no)
+rip saucepan list                  # browse newest companions and extract-ready URLs
 rip saucepan extract <url>         # rip a companion card + lorebooks (URL or bare companion id)
 rip saucepan extract <url> --no-lorebooks   # card only, skip attached lorebooks
 rip saucepan logout                # forget the stored token

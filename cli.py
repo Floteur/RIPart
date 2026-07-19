@@ -75,7 +75,7 @@ click.rich_click.COMMAND_GROUPS = {
     ],
     "rip saucepan": [
         {"name": "Session & login", "commands": ["login", "status", "logout"]},
-        {"name": "Ripping", "commands": ["extract", "providers"]},
+        {"name": "Ripping", "commands": ["list", "extract", "providers"]},
     ],
     "rip clank": [
         {"name": "Session & login", "commands": ["login", "status", "logout"]},
@@ -817,7 +817,8 @@ def saucepan() -> None:
     \b
       1. rip saucepan login            store a bearer token (reused afterwards)
       2. rip saucepan status           confirm a token is configured
-      3. rip saucepan extract <url>    rip a companion card
+      3. rip saucepan list             browse newest companions
+      4. rip saucepan extract <url>    rip a companion card
 
     A [cyan]saucepan.ai[/] URL passed to [bold]rip extract[/] is routed here too.
     """
@@ -863,6 +864,81 @@ def saucepan_logout() -> None:
     """Forget the stored Saucepan token."""
     sp.clear_token()
     _ok("Saucepan token cleared")
+
+
+@saucepan.command("list")
+@click.option(
+    "--limit",
+    type=click.IntRange(min=1, max=96),
+    default=30,
+    show_default=True,
+    help="Max companions to display.",
+)
+@click.option(
+    "--offset", type=click.IntRange(min=0), default=0, show_default=True, help="Results to skip."
+)
+@click.option("--tag", "tags", multiple=True, metavar="TAG", help="Require a tag (repeatable).")
+@click.option(
+    "--exclude-tag",
+    "excluded_tags",
+    multiple=True,
+    metavar="TAG",
+    help="Exclude a tag (repeatable).",
+)
+@click.option("--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW companions.")
+def saucepan_list(
+    limit: int,
+    offset: int,
+    tags: tuple[str, ...],
+    excluded_tags: tuple[str, ...],
+    nsfw: bool,
+) -> None:
+    """Browse newest Saucepan companions with URLs usable by [bold]extract[/]."""
+    try:
+        result = sp.search_companions(
+            limit=limit,
+            offset=offset,
+            tags=list(tags),
+            excluded_tags=list(excluded_tags),
+            include_nsfw=nsfw,
+        )
+    except sp.SaucepanError as exc:
+        _no(str(exc))
+        if exc.status == 401:
+            err_console.print("[dim]run [bold]rip saucepan login[/] to authenticate[/]")
+        raise SystemExit(1)
+
+    companions = result["companions"]
+    if not companions:
+        _no("no companions returned")
+        return
+
+    table = Table(box=None, pad_edge=False, show_edge=False)
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("companion", style="bold")
+    table.add_column("creator", style="cyan")
+    table.add_column("posted", style="cyan")
+    table.add_column("chats", justify="right")
+    table.add_column("tags", style="dim")
+    table.add_column("url")
+    for index, companion in enumerate(companions, offset + 1):
+        companion_id = str(companion.get("id") or companion.get("companion_id") or "")
+        name = str(companion.get("display_name") or companion.get("name") or "?")
+        tags = companion.get("tags") if isinstance(companion.get("tags"), list) else []
+        nsfw_mark = " [red]nsfw[/]" if companion.get("is_nsfw") or companion.get("sus") else ""
+        table.add_row(
+            str(index),
+            name[:34] + nsfw_mark,
+            str(companion.get("author_handle") or "?"),
+            str(companion.get("posted_at") or "")[:10],
+            str(companion.get("chat_count") or "0"),
+            ", ".join(str(tag) for tag in tags[:4]),
+            f"{sp.SAUCEPAN_ORIGIN}/companion/{companion_id}" if companion_id else "-",
+        )
+    console.print(table)
+    total_count = result.get("total_count")
+    total = str(total_count) if isinstance(total_count, int) else "?"
+    _field("listed", f"{len(companions)} of {total} companion(s) (offset={offset})")
 
 
 @saucepan.command("providers")

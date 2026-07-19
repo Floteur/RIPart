@@ -34,6 +34,7 @@ from .client import (
     parse_companion_id,
     set_token,
     set_trace_level,
+    search_companions,
     token_expiry,
     use_token,
 )
@@ -100,6 +101,7 @@ __all__ = [
     "set_provider_prompt",
     "set_token",
     "set_trace_level",
+    "search_companions",
     "token_expiry",
     "update_provider_config",
     "use_token",
