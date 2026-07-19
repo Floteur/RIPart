@@ -108,6 +108,7 @@ Run `rip COMMAND --help` for the full, colour-coded help of any command.
 | `rip janitor login` | Open JanitorAI and wait for you to sign in. `--timeout SECONDS` (default 180). |
 | `rip janitor import-session PATH` | Import a cookie/localStorage JSON dump into the profile - handy on headless servers where you can't log in interactively. |
 | `rip janitor inspect URL` | Fetch a character's public metadata and public lorebooks (read-only). Writes `output/cli/inspections/<name>.json`. |
+| `rip janitor lorebook ID` | Fetch a lorebook by ID and save every public character the provider reports as using it. This creates a reusable regeneration queue at `output/cli/lorebooks/<id>.json` and `output/cli/library/lorebooks/janitor/<id>.json`. |
 | `rip janitor extract URL` | Rip the private card + lorebook via `generateAlpha`. Writes the capture, raw lorebook, character card, and avatar under `output/cli/extracts/<name>/`. |
 | `rip extract URL` | Route a Saucepan, clank.world, spicychat.ai, chub.ai/character-tavern.com, or direct card-file URL to its matching extractor. JanitorAI is also accepted as a legacy alias for `rip janitor extract`. |
 | `rip saucepan …` | Rip companions from [Saucepan](https://saucepan.ai) via its REST API (no browser). See below. |

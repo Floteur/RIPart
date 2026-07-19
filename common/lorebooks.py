@@ -86,6 +86,10 @@ def _record_path(library_dir: Path, source: str, identity: str) -> Path:
     return library_dir / "lorebooks" / safe_source / f"{safe_identity}.json"
 
 
+def _evidence_path(library_dir: Path, source: str) -> Path:
+    return library_dir / "lorebooks" / _safe_component(source) / "evidence.json"
+
+
 def _private_entries(result: dict[str, Any]) -> list[str]:
     entries: list[str] = []
     seen: set[str] = set()
@@ -103,14 +107,67 @@ def _private_entries(result: dict[str, Any]) -> list[str]:
     return entries
 
 
+def _referenced_characters(book: dict[str, Any]) -> list[dict[str, str]]:
+    """Normalize a provider lorebook's character attachment index."""
+    refs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in book.get("referencedCharacters") or []:
+        if not isinstance(item, dict):
+            continue
+        character_id = str(item.get("id") or "").strip()
+        if not character_id or character_id in seen:
+            continue
+        seen.add(character_id)
+        ref = {"id": character_id}
+        for field in ("name", "url", "creator"):
+            value = str(item.get(field) or "").strip()
+            if value:
+                ref[field] = value
+        refs.append(ref)
+    return refs
+
+
+def _merge_referenced_characters(
+    existing: Any, current: list[dict[str, str]]
+) -> list[dict[str, str]]:
+    """Merge an attachment index without losing characters from an older crawl."""
+    merged: list[dict[str, str]] = []
+    positions: dict[str, int] = {}
+    for item in [*(existing if isinstance(existing, list) else []), *current]:
+        if not isinstance(item, dict):
+            continue
+        character_id = str(item.get("id") or "").strip()
+        if not character_id:
+            continue
+        normalized = {"id": character_id}
+        for field in ("name", "url", "creator"):
+            value = str(item.get(field) or "").strip()
+            if value:
+                normalized[field] = value
+        if character_id in positions:
+            merged[positions[character_id]] = normalized
+        else:
+            positions[character_id] = len(merged)
+            merged.append(normalized)
+    return merged
+
+
 def _write_unassigned_observations(
     library_dir: Path,
     source: str,
     character_id: str,
     result: dict[str, Any],
     now: str,
+    attached_lorebook_ids: list[str],
 ) -> str | None:
-    """Persist private blocks without guessing which attached book owns them."""
+    """Persist private blocks and cross-character attribution evidence.
+
+    A single capture with several private books cannot identify an owner.  When
+    the exact same recovered block appears on another character, however, the
+    intersection of their attached lorebook IDs is evidence.  Promote only a
+    one-ID intersection; all other observations remain available for later
+    captures rather than being guessed or discarded.
+    """
     entries = _private_entries(result)
     if not entries or not character_id:
         return None
@@ -121,14 +178,102 @@ def _write_unassigned_observations(
         / "unassigned"
         / f"{_safe_component(character_id)}.json"
     )
-    new_observations = [
-        {
-            "content": content,
-            "contentFingerprint": hashlib.sha256(norm(content).encode("utf-8")).hexdigest(),
-            "attribution": {"status": "unassigned", "candidates": []},
+    trigger_map = result.get("recoveredTriggers") or {}
+    candidate_ids = sorted(set(attached_lorebook_ids))
+    evidence_file = _evidence_path(library_dir, source)
+    try:
+        evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        evidence = {}
+    evidence_items = evidence.get("observations") if isinstance(evidence, dict) else {}
+    evidence_items = evidence_items if isinstance(evidence_items, dict) else {}
+
+    new_observations: list[dict[str, Any]] = []
+    assigned: dict[str, list[dict[str, Any]]] = {}
+    for content in entries:
+        fingerprint = hashlib.sha256(norm(content).encode("utf-8")).hexdigest()
+        item = evidence_items.get(fingerprint)
+        item = item if isinstance(item, dict) else {}
+        sightings = item.get("sightings") if isinstance(item.get("sightings"), list) else []
+        sighting = {
+            "characterId": character_id,
+            "candidateLorebookIds": candidate_ids,
+            "seenAt": now,
         }
-        for content in entries
-    ]
+        if not any(
+            isinstance(old, dict) and old.get("characterId") == character_id
+            for old in sightings
+        ):
+            sightings.append(sighting)
+        sets = [
+            set(old.get("candidateLorebookIds") or [])
+            for old in sightings
+            if isinstance(old, dict) and old.get("candidateLorebookIds")
+        ]
+        candidates = sorted(set.intersection(*sets)) if sets else []
+        status = "inferred" if len(candidates) == 1 else "unassigned"
+        item = {
+            "content": content,
+            "contentFingerprint": fingerprint,
+            "sightings": sightings,
+            "candidateLorebookIds": candidates,
+            "attribution": {"status": status, "candidates": candidates},
+            "updatedAt": now,
+        }
+        evidence_items[fingerprint] = item
+        triggers = trigger_map.get(norm(content), []) if isinstance(trigger_map, dict) else []
+        observation = {
+            "content": content,
+            "contentFingerprint": fingerprint,
+            "attribution": {"status": status, "candidates": candidates},
+        }
+        if triggers:
+            observation["inferredTriggers"] = triggers
+        new_observations.append(observation)
+        if status == "inferred":
+            assigned.setdefault(candidates[0], []).append(observation)
+
+    write_json(
+        evidence_file,
+        {
+            "schemaVersion": 1,
+            "source": source,
+            "updatedAt": now,
+            "observations": evidence_items,
+        },
+    )
+    # Reconcile prior character captures too.  The evidence record is the
+    # source of truth; per-character files are a convenient, inspectable view.
+    attribution_by_fingerprint = {
+        fingerprint: item["attribution"]
+        for fingerprint, item in evidence_items.items()
+        if isinstance(item, dict) and isinstance(item.get("attribution"), dict)
+    }
+    for observation_file in path.parent.glob("*.json"):
+        try:
+            prior_capture = json.loads(observation_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        prior_observations = (
+            prior_capture.get("observations")
+            if isinstance(prior_capture, dict)
+            else None
+        )
+        if not isinstance(prior_observations, list):
+            continue
+        changed = False
+        for observation in prior_observations:
+            if not isinstance(observation, dict):
+                continue
+            attribution = attribution_by_fingerprint.get(
+                str(observation.get("contentFingerprint") or "")
+            )
+            if attribution and observation.get("attribution") != attribution:
+                observation["attribution"] = attribution
+                changed = True
+        if changed:
+            prior_capture["updatedAt"] = now
+            write_json(observation_file, prior_capture)
     try:
         existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except (OSError, json.JSONDecodeError):
@@ -136,14 +281,19 @@ def _write_unassigned_observations(
     prior = existing.get("observations") if isinstance(existing, dict) else []
     prior = prior if isinstance(prior, list) else []
     observations: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    positions: dict[str, int] = {}
     for observation in [*prior, *new_observations]:
         if not isinstance(observation, dict):
             continue
         fingerprint = str(observation.get("contentFingerprint") or "")
-        if not fingerprint or fingerprint in seen:
+        if not fingerprint:
             continue
-        seen.add(fingerprint)
+        if fingerprint in positions:
+            # Prefer the fresh evidence-backed record over a stale copy from a
+            # previous extraction of this same character.
+            observations[positions[fingerprint]] = observation
+            continue
+        positions[fingerprint] = len(observations)
         observations.append(observation)
     write_json(
         path,
@@ -158,6 +308,22 @@ def _write_unassigned_observations(
             "observations": observations,
         },
     )
+    # Attach promoted observations to their reusable provider-lorebook record.
+    for lorebook_id, items in assigned.items():
+        record_file = _record_path(library_dir, source, lorebook_id)
+        try:
+            record = json.loads(record_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        recovered = record.get("recoveredObservations")
+        recovered = recovered if isinstance(recovered, list) else []
+        known = {str(item.get("contentFingerprint") or "") for item in recovered if isinstance(item, dict)}
+        recovered.extend(
+            item for item in items if item["contentFingerprint"] not in known
+        )
+        record["recoveredObservations"] = recovered
+        record["updatedAt"] = now
+        write_json(record_file, record)
     return str(path)
 
 
@@ -166,23 +332,29 @@ def update_lorebook_library(
     character_id: str,
     result: dict[str, Any],
 ) -> list[str]:
-    """Upsert accessible lorebooks and return the written record paths.
+    """Upsert attached lorebooks and return the written record paths.
 
-    Private recovered blocks are written as unassigned observations: an
-    extraction does not reveal which of multiple private books produced them.
-    A future evidence-based reconciliation step can assign them safely.
+    Lorebooks with inaccessible entries retain their provider ID and attachment
+    history.  Private recovered blocks are reconciled only when repeated
+    observations leave one compatible attached lorebook.
     """
     source = _source_name(str(result.get("url") or ""))
     now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     written: list[str] = []
+    attached_lorebook_ids: list[str] = []
     for book in result.get("publicLorebooks") or []:
         if not isinstance(book, dict):
             continue
         entries = _entries(book)
-        if not entries:
-            continue
         title = str(book.get("title") or "").strip()
         source_id = str(book.get("id") or "").strip() or None
+        # A private Janitor lorebook still has a stable script ID. Keep that
+        # record even when its entries cannot be fetched, so recovered prompt
+        # text from multiple characters can later be attributed to it.
+        if source_id:
+            attached_lorebook_ids.append(source_id)
+        if not entries and not source_id:
+            continue
         fingerprint = _fingerprint(book, entries)
         identity = source_id or f"content-{fingerprint}"
         path = _record_path(library_dir, source, identity)
@@ -196,6 +368,16 @@ def update_lorebook_library(
         character_ids = [str(value) for value in character_ids if str(value).strip()]
         if character_id and character_id not in character_ids:
             character_ids.append(character_id)
+        referenced_characters = _merge_referenced_characters(
+            existing.get("referencedCharacters") if isinstance(existing, dict) else [],
+            _referenced_characters(book),
+        )
+        recovered_observations = (
+            existing.get("recoveredObservations") if isinstance(existing, dict) else []
+        )
+        recovered_observations = (
+            recovered_observations if isinstance(recovered_observations, list) else []
+        )
         record = {
             "schemaVersion": 1,
             "source": source,
@@ -204,14 +386,26 @@ def update_lorebook_library(
             "title": title,
             "worldInfo": {"entries": entries},
             "entryCount": len(entries),
+            "accessible": bool(book.get("accessible")),
             "characterIds": character_ids,
+            # ``characterIds`` is the subset extracted into this local library.
+            # The provider's script response can list additional public users of
+            # the lorebook; retain them as a regeneration queue without claiming
+            # they have already been captured locally.
+            "referencedCharacters": referenced_characters,
+            "recoveredObservations": recovered_observations,
             "firstSeenAt": existing.get("firstSeenAt", now) if isinstance(existing, dict) else now,
             "updatedAt": now,
         }
         write_json(path, record)
         written.append(str(path))
     unassigned_path = _write_unassigned_observations(
-        library_dir, source, character_id, result, now
+        library_dir,
+        source,
+        character_id,
+        result,
+        now,
+        attached_lorebook_ids,
     )
     if unassigned_path:
         written.append(unassigned_path)

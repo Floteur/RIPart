@@ -69,6 +69,43 @@ def test_publish_card_reports_discord_errors(monkeypatch, tmp_path):
     }
 
 
+def test_publish_lorebooks_uses_the_dedicated_publisher(monkeypatch, tmp_path):
+    record_path = tmp_path / "lorebooks" / "janitor" / "book-42.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        discord_forum.json.dumps(
+            {
+                "source": "janitor",
+                "sourceLorebookId": "book-42",
+                "title": "Shared book",
+                "entryCount": 3,
+                "updatedAt": "2026-07-20T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict = {}
+
+    class LorebookPublisher:
+        def lorebook_thread_index(self):
+            return {}
+
+        def upsert_lorebook(self, **kwargs):
+            captured.update(kwargs)
+            return {"action": "create", "thread_id": "lorebook-thread"}
+
+    monkeypatch.setattr(
+        discord_forum, "_lorebook_publisher_from_env", lambda: LorebookPublisher()
+    )
+
+    outcome = discord_forum.publish_lorebooks([str(record_path)])
+
+    assert outcome == [{"action": "create", "thread_id": "lorebook-thread"}]
+    assert captured["key"] == "janitor:book-42"
+    assert captured["title"] == "janitor: Shared book"
+    assert captured["filename"] == "janitor-book-42.json"
+
+
 def test_upsert_creates_a_thread_with_the_rich_embed(tmp_path):
     """The thread-creation payload uses the embed, not the former text body."""
     png_path = tmp_path / "card.png"

@@ -1,4 +1,4 @@
-"""Publish ripped cards to a Discord forum, one thread per character (UUID-keyed).
+"""Publish ripped cards and lorebooks to their respective Discord forums.
 
 Every rip funnels through :func:`ripart.common.cards.save_to_library`, which calls
 :func:`publish_card` here. Publishing is an *upsert* keyed on the character UUID,
@@ -12,15 +12,16 @@ which is embedded in the thread title (``<name> · <uuid>``, capped at Discord's
 * **UUID is new** → create a forum post titled ``<name> · <uuid>``, tagged with
   its platform tag plus up to four content tags, with the card PNG attached.
 
-The dedup lookup lists the forum's *active and archived* threads (forum posts
-auto-archive), recovering the UUID→thread map even for old posts. Everything is
-best-effort: a Discord failure is swallowed so it can never break a rip. The
-whole feature is off unless ``DISCORD_BOT_TOKEN`` (+ guild/forum ids) is set in
-``.env``.
+The character archive uses ``DISCORD_FORUM_CHANNEL_ID``.  The optional separate
+lorebook archive uses ``DISCORD_LOREBOOK_FORUM_CHANNEL_ID`` and upserts the
+durable lorebook-library JSON after every extraction.  Both look through active
+and archived threads, and both are best-effort so a Discord outage never breaks
+a rip.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -43,6 +44,7 @@ _UA = "ripart (https://github.com/, forum-archiver)"
 _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
+_LOREBOOK_MARKER_RE = re.compile(r"ripart-lorebook:([0-9a-f]{64})")
 
 # Forum-title hard cap and per-post applied-tag cap (both Discord limits).
 _TITLE_CAP = 100
@@ -432,12 +434,10 @@ class ForumPublisher:
 
     # -- UUID → thread discovery ------------------------------------------ #
 
-    def thread_index(self) -> dict[str, str]:
-        """Map every UUID currently in the forum to its thread id.
+    def _thread_index(self, pattern: re.Pattern[str]) -> dict[str, str]:
+        """Map marker keys in active and archived threads to thread ids.
 
-        Scans active threads plus every page of archived public threads (forum
-        posts auto-archive), so re-running a rip finds the original thread no
-        matter how old it is.
+        Forum posts auto-archive, so both listings are needed for a real upsert.
         """
         found: dict[str, str] = {}
 
@@ -445,7 +445,7 @@ class ForumPublisher:
         if active.status_code == 200:
             for thread in active.json().get("threads") or []:
                 if thread.get("parent_id") == self.forum_id:
-                    self._record(found, thread)
+                    self._record(found, thread, pattern)
 
         before: str | None = None
         for _ in range(50):  # generous page cap (100 threads/page)
@@ -459,7 +459,7 @@ class ForumPublisher:
             body = page.json()
             threads = body.get("threads") or []
             for thread in threads:
-                self._record(found, thread)
+                self._record(found, thread, pattern)
             if not body.get("has_more") or not threads:
                 break
             before = (threads[-1].get("thread_metadata") or {}).get(
@@ -469,11 +469,22 @@ class ForumPublisher:
                 break
         return found
 
+    def thread_index(self) -> dict[str, str]:
+        """Map character UUIDs currently in the forum to their thread ids."""
+        return self._thread_index(_UUID_RE)
+
+    def lorebook_thread_index(self) -> dict[str, str]:
+        """Map stable lorebook markers currently in the forum to thread ids."""
+        return self._thread_index(_LOREBOOK_MARKER_RE)
+
     @staticmethod
-    def _record(found: dict[str, str], thread: dict[str, Any]) -> None:
-        match = _UUID_RE.search(thread.get("name") or "")
+    def _record(
+        found: dict[str, str], thread: dict[str, Any], pattern: re.Pattern[str]
+    ) -> None:
+        match = pattern.search(thread.get("name") or "")
         if match:
-            found.setdefault(match.group().lower(), thread["id"])
+            key = (match.group(1) if match.lastindex else match.group()).lower()
+            found.setdefault(key, thread["id"])
 
     # -- create / reply --------------------------------------------------- #
 
@@ -509,6 +520,26 @@ class ForumPublisher:
         if resp.status_code in (200, 201):
             return resp.json()
         raise RuntimeError(f"create_post HTTP {resp.status_code}: {resp.text[:200]}")
+
+    def create_file_post(
+        self,
+        *,
+        title: str,
+        embed: dict[str, Any],
+        filename: str,
+        content: bytes,
+    ) -> dict[str, Any] | None:
+        """Create a forum post with one JSON attachment and its summary embed."""
+        payload = {"name": title, "message": {"embeds": [embed]}}
+        resp = self._request(
+            "POST",
+            f"/channels/{self.forum_id}/threads",
+            data={"payload_json": json.dumps(payload)},
+            files=self._json_files([(filename, content)]),
+        )
+        if resp.status_code in (200, 201):
+            return resp.json()
+        raise RuntimeError(f"create_file_post HTTP {resp.status_code}: {resp.text[:200]}")
 
     def reply(
         self, thread_id: str, *, embed: dict[str, Any], png_path: Path
@@ -561,6 +592,28 @@ class ForumPublisher:
             return resp.json()
         raise RuntimeError(
             f"lorebook attachment reply HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+
+    def reply_lorebook_record(
+        self,
+        thread_id: str,
+        *,
+        embed: dict[str, Any],
+        filename: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        """Append one versioned lorebook-library record to its forum thread."""
+        self._request("PATCH", f"/channels/{thread_id}", json_body={"archived": False})
+        resp = self._request(
+            "POST",
+            f"/channels/{thread_id}/messages",
+            data={"payload_json": json.dumps({"embeds": [embed]})},
+            files=self._json_files([(filename, content)]),
+        )
+        if resp.status_code in (200, 201):
+            return resp.json()
+        raise RuntimeError(
+            f"lorebook record reply HTTP {resp.status_code}: {resp.text[:200]}"
         )
 
     # -- the upsert ------------------------------------------------------- #
@@ -624,6 +677,56 @@ class ForumPublisher:
             thread_index[key] = thread_id  # keep the shared map fresh in a batch
         return {"action": "create", "thread_id": thread_id, "uuid": uuid}
 
+    def upsert_lorebook(
+        self,
+        *,
+        key: str,
+        title: str,
+        record: dict[str, Any],
+        filename: str,
+        thread_index: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Upsert one durable lorebook record, retaining each extraction version."""
+        marker = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        index = self.lorebook_thread_index() if thread_index is None else thread_index
+        record_bytes = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
+        entry_count = record.get("entryCount", 0)
+        fields = [
+            {"name": "Source", "value": str(record.get("source") or "unknown"), "inline": True},
+            {"name": "Entries", "value": str(entry_count), "inline": True},
+            {"name": "Updated", "value": str(record.get("updatedAt") or "unknown"), "inline": False},
+        ]
+        if record.get("sourceLorebookId"):
+            fields.append(
+                {"name": "Provider lorebook ID", "value": str(record["sourceLorebookId"]), "inline": False}
+            )
+        if record.get("characterIds"):
+            fields.append(
+                {"name": "Captured characters", "value": str(len(record["characterIds"])), "inline": True}
+            )
+        embed = {
+            "title": title[:_EMBED_TITLE_CAP],
+            "description": "Latest extracted lorebook record is attached as JSON.",
+            "fields": fields,
+            "footer": {"text": "ripart lorebook archive"},
+        }
+        thread_title = _title_for(title, f"ripart-lorebook:{marker}")
+        existing = index.get(marker)
+        if existing:
+            if self.on_duplicate == "skip":
+                return {"action": "skip", "thread_id": existing, "key": key}
+            self.reply_lorebook_record(
+                existing, embed=embed, filename=filename, content=record_bytes
+            )
+            return {"action": "repost", "thread_id": existing, "key": key}
+        created = self.create_file_post(
+            title=thread_title, embed=embed, filename=filename, content=record_bytes
+        )
+        thread_id = (created or {}).get("id")
+        if thread_index is not None and thread_id:
+            thread_index[marker] = thread_id
+        return {"action": "create", "thread_id": thread_id, "key": key}
+
 
 def _publisher_from_env() -> ForumPublisher | None:
     """Build a publisher from ``.env`` config, or ``None`` when disabled."""
@@ -631,6 +734,22 @@ def _publisher_from_env() -> ForumPublisher | None:
     token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
     guild = os.environ.get("DISCORD_GUILD_ID", "").strip()
     forum = os.environ.get("DISCORD_FORUM_CHANNEL_ID", "").strip()
+    if not (token and guild and forum):
+        return None
+    return ForumPublisher(
+        token=token,
+        guild_id=guild,
+        forum_id=forum,
+        on_duplicate=os.environ.get("DISCORD_ON_DUPLICATE", "repost"),
+    )
+
+
+def _lorebook_publisher_from_env() -> ForumPublisher | None:
+    """Build the optional publisher dedicated to durable lorebook records."""
+    _load_env()
+    token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    guild = os.environ.get("DISCORD_GUILD_ID", "").strip()
+    forum = os.environ.get("DISCORD_LOREBOOK_FORUM_CHANNEL_ID", "").strip()
     if not (token and guild and forum):
         return None
     return ForumPublisher(
@@ -666,11 +785,54 @@ def publish_card(
             meta=result.get("meta") or {},
             definition_source=character.get("definitionSource") or "",
             detail_embeds=_detail_embeds_for(result),
-            lorebook_files=_lorebook_files_for(character_id, result),
             png_path=Path(png_path),
         )
     except Exception as exc:  # noqa: BLE001 - publishing is best-effort
         return {"action": "error", "uuid": character_id, "error": str(exc)}
+
+
+def publish_lorebooks(lorebook_paths: list[str]) -> list[dict[str, Any]]:
+    """Best-effort upsert of changed library lorebooks to their dedicated forum.
+
+    ``update_lorebook_library`` returns both provider-lorebook records and
+    private/unassigned observation records.  Both are useful extraction evidence,
+    so each gets a stable thread and every later retrieval becomes a new reply.
+    """
+    publisher = _lorebook_publisher_from_env()
+    if publisher is None:
+        return []
+    outcomes: list[dict[str, Any]] = []
+    try:
+        shared = publisher.lorebook_thread_index()
+    except Exception as exc:  # noqa: BLE001 - preserve extraction on Discord failure
+        return [{"action": "error", "error": str(exc)}]
+    for raw_path in lorebook_paths:
+        path = Path(raw_path)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                raise ValueError("lorebook record is not a JSON object")
+            source = str(record.get("source") or path.parent.name or "unknown")
+            source_id = str(record.get("sourceLorebookId") or "").strip()
+            key = f"{source}:{source_id or path.stem}"
+            title = str(record.get("title") or "Private observations").strip()
+            filename = f"{_safe_filename(source)}-{_safe_filename(source_id or path.stem)}.json"
+            outcomes.append(
+                publisher.upsert_lorebook(
+                    key=key,
+                    title=f"{source}: {title}",
+                    record=record,
+                    filename=filename,
+                    thread_index=shared,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - continue through changed records
+            outcomes.append({"action": "error", "path": str(path), "error": str(exc)})
+    return outcomes
+
+
+def _safe_filename(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-") or "lorebook"
 
 
 def publish_library(library_dir: Path) -> list[dict[str, Any]]:

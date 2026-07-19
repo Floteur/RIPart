@@ -44,3 +44,49 @@ def test_janitor_list_can_disable_the_fallback(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert captured["jllm_leak"] is False
+
+
+def test_janitor_lorebook_indexes_all_provider_linked_characters(monkeypatch, tmp_path):
+    captured: dict = {}
+
+    def fake_lorebook_task(data, **browser_options):
+        captured.update(data)
+        captured["browser_options"] = browser_options
+        return {
+            "url": "https://janitorai.com/hampter/script/book-42",
+            "lorebook": {
+                "id": "book-42",
+                "title": "Shared setting",
+                "accessible": False,
+                "worldInfo": {"entries": {}},
+                "referencedCharacters": [
+                    {
+                        "id": "char-a",
+                        "name": "Alpha",
+                        "url": "https://janitorai.com/characters/char-a",
+                    },
+                    {
+                        "id": "char-b",
+                        "name": "Beta",
+                        "url": "https://janitorai.com/characters/char-b",
+                    },
+                ],
+            },
+            "characters": [
+                {"id": "char-a", "name": "Alpha", "url": "https://janitorai.com/characters/char-a"},
+                {"id": "char-b", "name": "Beta", "url": "https://janitorai.com/characters/char-b"},
+            ],
+        }
+
+    monkeypatch.setattr(cli, "OUT", tmp_path)
+    monkeypatch.setattr(cli, "lorebook_task", fake_lorebook_task)
+
+    result = CliRunner().invoke(cli.main, ["janitor", "lorebook", "book-42", "--limit", "1"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["lorebook_id"] == "book-42"
+    assert "attached characters: 2" in result.output
+    index = tmp_path / "lorebooks" / "book-42.json"
+    assert index.exists()
+    record = tmp_path / "library" / "lorebooks" / "janitor" / "book-42.json"
+    assert record.exists()

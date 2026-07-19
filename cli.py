@@ -20,6 +20,7 @@ from rich.console import Console
 from rich.table import Table
 
 from .common.cards import save_to_library
+from .common.lorebooks import update_lorebook_library
 from .common.text import safe_name, write_json
 from .providers import chub as cb
 from .providers import clank as ck
@@ -31,6 +32,7 @@ from .providers.janitor import (
     import_session_task,
     inspect_task,
     login_task,
+    lorebook_task,
     recent_task,
     status_task,
 )
@@ -450,6 +452,66 @@ def _print_import_diagnostics(diagnostics: dict, probe: dict | None = None) -> N
                     f"    - {cookie.get('name')} domain={cookie.get('domain')} "
                     f"sameSite={cookie.get('sameSite')} expires={cookie.get('expiresUtc')}{suffix}"
                 )
+
+
+# --------------------------------------------------------------------------- #
+# lorebook index
+# --------------------------------------------------------------------------- #
+
+
+@main.command("lorebook")
+@click.argument("lorebook_id", metavar="LOREBOOK_ID")
+@click.option(
+    "--limit",
+    type=int,
+    default=30,
+    show_default=True,
+    metavar="N",
+    help="How many attached characters to print (the saved index always contains all).",
+)
+@headed_option
+def lorebook(lorebook_id: str, limit: int, headed: bool) -> None:
+    """Index every public character attached to a JanitorAI lorebook ID.
+
+    The provider returns this relationship from the script endpoint. RIPart
+    stores it beside the lorebook so the listed URLs can be extracted later to
+    recover and reconcile private entries.
+    """
+    result = lorebook_task({"lorebook_id": lorebook_id}, **browser_kwargs(headed))
+    book = result.get("lorebook") or {}
+    characters = result.get("characters") or []
+    title = str(book.get("title") or lorebook_id)
+    index_path = write_json(
+        OUT / "lorebooks" / f"{safe_name(lorebook_id, 'lorebook')}.json", result
+    )
+    record_paths = update_lorebook_library(
+        OUT / "library",
+        "",
+        {"url": result.get("url") or "", "publicLorebooks": [book]},
+    )
+
+    _ok(f"indexed [bold]{title}[/]")
+    _field("attached characters", len(characters))
+    _path("character index", index_path)
+    if record_paths:
+        _path("reusable lorebook", record_paths[0])
+    if limit > 0 and characters:
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("character")
+        table.add_column("creator")
+        table.add_column("URL")
+        for character in characters[:limit]:
+            table.add_row(
+                str(character.get("name") or character.get("id") or ""),
+                str(character.get("creator") or ""),
+                str(character.get("url") or ""),
+            )
+        console.print(table)
+        if len(characters) > limit:
+            _field(
+                "not shown",
+                f"{len(characters) - limit} more (all are in the saved index)",
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -921,7 +983,7 @@ def janitor() -> None:
 # JanitorAI predates the provider groups, so these commands were originally
 # registered directly on `rip`. Register the same command objects here rather
 # than maintaining two wrappers whose options could drift apart.
-for _janitor_command in (status, login, import_session, inspect, extract, recent):
+for _janitor_command in (status, login, import_session, lorebook, inspect, extract, recent):
     janitor.add_command(_janitor_command)
 # Provider groups use `list`; retain `recent` too because it describes the
 # ordering and preserves the original JanitorAI command name.

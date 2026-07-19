@@ -670,6 +670,65 @@ def _parse_script_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
     return []
 
 
+def _script_character_refs(record: dict[str, Any]) -> list[dict[str, str]]:
+    """Return the public character index carried by a lorebook response.
+
+    Janitor's script endpoint includes every public character currently
+    attached to that lorebook.  Keep this provider-supplied relationship: it
+    is much stronger evidence than trying to infer shared lorebook ownership
+    from matching prompt text alone.
+    """
+    refs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in record.get("characters") or []:
+        if not isinstance(item, dict):
+            continue
+        character_id = str(item.get("id") or "").strip()
+        if not character_id or character_id in seen:
+            continue
+        seen.add(character_id)
+        ref = {
+            "id": character_id,
+            "name": str(item.get("name") or "").strip(),
+            "url": f"{ORIGIN}/characters/{character_id}",
+        }
+        creator = str(item.get("creator_name") or "").strip()
+        if creator:
+            ref["creator"] = creator
+        refs.append(ref)
+    return refs
+
+
+def _public_lorebook_from_response(
+    ref: dict[str, str], result: dict[str, Any]
+) -> dict[str, Any]:
+    """Convert one script HTTP response into the public lorebook shape."""
+    base = {"id": ref["id"], "title": ref["title"], "accessible": False}
+    if not isinstance(result, dict) or int(result.get("status") or 0) >= 400:
+        status = result.get("status") if isinstance(result, dict) else "?"
+        return {**base, "error": f"HTTP {status}"}
+    try:
+        record = json.loads(result.get("body") or "")
+        if not isinstance(record, dict):
+            raise ValueError("script response was not an object")
+        entries = _parse_script_entries(record)
+        world_info = build_world_info(entries)
+        count = len(world_info["entries"])
+        return {
+            "id": str(record.get("id") or ref["id"]),
+            "title": record.get("title") or ref["title"],
+            "description": html_to_text(record.get("description") or ""),
+            "accessible": count > 0 and record.get("is_code_public") is True,
+            "isPublic": record.get("is_public") is True,
+            "isCodePublic": record.get("is_code_public") is True,
+            "entryCount": count,
+            "referencedCharacters": _script_character_refs(record),
+            "worldInfo": world_info,
+        }
+    except Exception as exc:
+        return {**base, "error": str(exc)}
+
+
 def _public_entry_contents(books: list[dict[str, Any]]) -> list[str]:
     out: list[str] = []
     for book in books:
@@ -692,30 +751,7 @@ def _fetch_public_lorebooks(
     )
     books = []
     for ref, result in zip(refs, results):
-        base = {"id": ref["id"], "title": ref["title"], "accessible": False}
-        try:
-            if not isinstance(result, dict) or int(result.get("status") or 0) >= 400:
-                raise RuntimeError(
-                    f"HTTP {result.get('status') if isinstance(result, dict) else '?'}"
-                )
-            record = json.loads(result.get("body") or "")
-            entries = _parse_script_entries(record)
-            world_info = build_world_info(entries)
-            count = len(world_info["entries"])
-            books.append(
-                {
-                    "id": str(record.get("id") or ref["id"]),
-                    "title": record.get("title") or ref["title"],
-                    "description": html_to_text(record.get("description") or ""),
-                    "accessible": count > 0 and record.get("is_code_public") is True,
-                    "isPublic": record.get("is_public") is True,
-                    "isCodePublic": record.get("is_code_public") is True,
-                    "entryCount": count,
-                    "worldInfo": world_info,
-                }
-            )
-        except Exception as exc:
-            books.append({**base, "error": str(exc)})
+        books.append(_public_lorebook_from_response(ref, result))
     return books
 
 
@@ -1231,6 +1267,36 @@ def inspect_task(driver, data):
         "meta": meta,
         "publicLorebooks": public_lorebooks,
         "character": character,
+    }
+
+
+@browser(
+    profile=PROFILE,
+    headless=False,
+    output=None,
+    raise_exception=True,
+    close_on_crash=True,
+    create_error_logs=False,
+    add_arguments=BACKGROUND_ARGS,
+)
+def lorebook_task(driver, data):
+    """Fetch one lorebook and its provider-supplied character attachment index."""
+    lorebook_id = str((data or {}).get("lorebook_id") or "").strip()
+    if not lorebook_id:
+        raise ValueError("lorebook_id is required")
+    if not _open_authed_context(driver):
+        raise RuntimeError("Not logged into JanitorAI. Run `uv run rip janitor login` first.")
+    _export_session(driver)
+    response = _authed_fetch(driver, f"{ORIGIN}/hampter/script/{lorebook_id}")
+    book = _public_lorebook_from_response(
+        {"id": lorebook_id, "title": ""}, response
+    )
+    if book.get("error"):
+        raise RuntimeError(f"lorebook fetch failed: {book['error']}")
+    return {
+        "url": f"{ORIGIN}/hampter/script/{lorebook_id}",
+        "lorebook": book,
+        "characters": book.get("referencedCharacters") or [],
     }
 
 

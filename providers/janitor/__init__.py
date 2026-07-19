@@ -17,6 +17,7 @@ from .browser_tasks import (
     import_session_task,
     inspect_task,
     login_task,
+    lorebook_task,
     recent_task,
     status_task,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "inspect_task",
     "is_card_public",
     "login_task",
+    "lorebook_task",
     "merge_separated_results",
     "parse_character_id",
     "parse_leaked_definition",

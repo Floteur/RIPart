@@ -88,6 +88,89 @@ def test_private_observations_accumulate_across_extractions(tmp_path):
     ]
 
 
+def test_private_observation_is_attributed_when_shared_characters_leave_one_book(tmp_path):
+    first = _result(
+        {"id": "shared", "title": "Shared", "worldInfo": {"entries": {}}}
+    )
+    first["publicLorebooks"].append(
+        {"id": "other", "title": "Other", "worldInfo": {"entries": {}}}
+    )
+    first["entries"] = ["Shared private fact."]
+    update_lorebook_library(tmp_path, "char-a", first)
+
+    second = _result(
+        {"id": "shared", "title": "Shared", "worldInfo": {"entries": {}}}
+    )
+    second["entries"] = ["Shared private fact."]
+    update_lorebook_library(tmp_path, "char-b", second)
+
+    record = json.loads((tmp_path / "lorebooks" / "janitor" / "shared.json").read_text())
+    assert record["recoveredObservations"][0]["content"] == "Shared private fact."
+    evidence = json.loads((tmp_path / "lorebooks" / "janitor" / "evidence.json").read_text())
+    item = next(iter(evidence["observations"].values()))
+    assert item["attribution"] == {"status": "inferred", "candidates": ["shared"]}
+    first_capture = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "unassigned" / "char-a.json").read_text()
+    )
+    assert first_capture["observations"][0]["attribution"] == {
+        "status": "inferred",
+        "candidates": ["shared"],
+    }
+
+
+def test_inaccessible_lorebook_reference_is_saved_for_later_reconciliation(tmp_path):
+    result = _result(
+        {
+            "id": "private-book",
+            "title": "Not readable here",
+            "accessible": False,
+            "worldInfo": {"entries": {}},
+        }
+    )
+
+    paths = update_lorebook_library(tmp_path, "char-private", result)
+
+    assert paths == [str(tmp_path / "lorebooks" / "janitor" / "private-book.json")]
+    record = json.loads((tmp_path / "lorebooks" / "janitor" / "private-book.json").read_text())
+    assert record["entryCount"] == 0
+    assert record["accessible"] is False
+    assert record["characterIds"] == ["char-private"]
+
+
+def test_lorebook_record_keeps_provider_character_index_for_later_regeneration(tmp_path):
+    book = {
+        "id": "shared-world",
+        "title": "Shared world",
+        "referencedCharacters": [
+            {"id": "char-a", "name": "Alpha", "url": "https://example/a"},
+            {"id": "char-b", "name": "Beta", "creator": "Creator"},
+        ],
+        "worldInfo": {"entries": {}},
+    }
+
+    update_lorebook_library(tmp_path, "char-a", _result(book))
+    record = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "shared-world.json").read_text()
+    )
+
+    assert record["characterIds"] == ["char-a"]
+    assert record["referencedCharacters"] == book["referencedCharacters"]
+
+
+def test_lorebook_refresh_preserves_recovered_observations(tmp_path):
+    book = {"id": "shared-world", "worldInfo": {"entries": {}}}
+    result = _result(book)
+    result["entries"] = ["Recovered private fact."]
+    update_lorebook_library(tmp_path, "char-a", result)
+    result["entries"] = []
+    update_lorebook_library(tmp_path, "char-a", result)
+
+    record = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "shared-world.json").read_text()
+    )
+    assert record["recoveredObservations"][0]["content"] == "Recovered private fact."
+
+
 def test_fingerprint_distinguishes_behaviorally_different_books(tmp_path):
     first = {
         "title": "Imported book",
