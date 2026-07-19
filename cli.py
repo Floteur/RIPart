@@ -643,6 +643,7 @@ def _print_extract_diagnostics(diagnostics: dict) -> None:
     if "triggerSearchPasses" in diagnostics:
         _field("trigger search probes", diagnostics["triggerSearchPasses"])
         _field("entries with inferred keys", diagnostics.get("triggersFound", 0))
+        _field("always-active entries", diagnostics.get("constantEntries", 0))
     for trigger_pass in diagnostics.get("triggerPasses") or []:
         console.print(
             f"    - pass {trigger_pass.get('index')}: {trigger_pass.get('chars', 0)} chars, "

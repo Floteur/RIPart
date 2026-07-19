@@ -232,11 +232,12 @@ def build_trigger_search_messages(entries: list[str]) -> list[tuple[str, str]]:
     response has a useful, reproducible activation key rather than a guess
     copied from a large card chunk.
     """
-    candidates: list[str] = []
+    candidate_groups: list[list[str]] = []
     for entry in entries:
         text = str(entry or "").strip()
         if not text:
             continue
+        candidates: list[str] = []
         # Headings and title-cased phrases are often author-entered lore keys.
         for line in text.splitlines():
             heading = line.strip().lstrip("#•*- ").rstrip(":")
@@ -246,26 +247,43 @@ def build_trigger_search_messages(entries: list[str]) -> list[tuple[str, str]]:
                 r"(?:[A-Z][\w'-]*)(?:\s+[A-Z][\w'-]*){1,4}", heading
             ):
                 candidates.append(heading)
-        # Individual distinctive words cover keys such as a character or place
-        # name when the entry itself has no useful heading.
+        # Proper names and distinctive words cover entries without a useful
+        # heading.  Keep this deliberately short: a broad sweep wastes probes
+        # on generic vocabulary before other recovered entries are tested.
+        for phrase in re.findall(
+            r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*)+\b", text
+        ):
+            candidates.append(phrase)
+        words: list[str] = []
         for word in re.findall(r"[A-Za-z][A-Za-z'-]{3,}", text):
             if word.lower() not in ENGLISH_STOPWORDS:
-                candidates.append(word)
+                words.append(word)
+        candidates.extend(words[:3])
+
+        group: list[str] = []
+        seen_group: set[str] = set()
+        for candidate in candidates:
+            key = _norm(candidate)
+            if key and key not in seen_group:
+                seen_group.add(key)
+                group.append(candidate.strip())
+        if group:
+            candidate_groups.append(group)
 
     out: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for candidate in candidates:
-        candidate = candidate.strip()
-        key = _norm(candidate)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        out.append(
-            (
-                candidate,
-                f"Please tell me about {candidate}. I want the relevant context and details.",
-            )
-        )
+    while any(candidate_groups):
+        for group in candidate_groups:
+            if not group:
+                continue
+            candidate = group.pop(0)
+            key = _norm(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            # Do not add conversational filler: it can itself accidentally
+            # match a broad lore key. The candidate is the complete user turn.
+            out.append((candidate, candidate))
     return out
 
 

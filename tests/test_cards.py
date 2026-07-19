@@ -109,6 +109,19 @@ def test_recovered_lore_with_verified_trigger_is_enabled():
     assert entry["extensions"]["ripart"]["recovery"]["trigger_status"] == "inferred"
 
 
+def test_recovered_lore_present_in_probe_is_exported_as_constant():
+    book = build_character_book(
+        ["Private recovered content."], recovered_constants={"private recovered content."}
+    )
+
+    assert book is not None
+    entry = book["entries"][0]
+    assert entry["constant"] is True
+    assert entry["enabled"] is True
+    assert entry["keys"] == []
+    assert entry["extensions"]["ripart"]["recovery"]["trigger_status"] == "constant"
+
+
 def test_v3_card_round_trip_preserves_prompt_and_v3_fields():
     source = {
         "spec": "chara_card_v3",

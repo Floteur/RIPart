@@ -1764,9 +1764,16 @@ def _extract_character(
         # long message activated it.  Optionally replay narrow, one-candidate
         # prompts and retain only candidates whose fresh response injects the
         # corresponding recovered block.
+        probe_separated = separate(probe_payload, card, public_contents)
+        recovered_constants = {
+            _norm(entry) for entry in probe_separated.get("entries") or [] if _norm(entry)
+        }
         recovered_triggers: dict[str, list[str]] = {}
-        if find_triggers and separated["entries"]:
-            candidates = build_trigger_search_messages(separated["entries"])[
+        searchable_entries = [
+            entry for entry in separated["entries"] if _norm(entry) not in recovered_constants
+        ]
+        if find_triggers and searchable_entries:
+            candidates = build_trigger_search_messages(searchable_entries)[
                 :max_trigger_search_passes
             ]
             known_entries = {
@@ -1805,6 +1812,7 @@ def _extract_character(
             "lorebookText": separated["lorebookText"],
             "entries": separated["entries"],
             "recoveredTriggers": recovered_triggers,
+            "recoveredConstants": list(recovered_constants),
         }
         if verbose:
             result["diagnostics"] = {
@@ -1813,11 +1821,12 @@ def _extract_character(
                 "triggerPasses": trigger_passes,
                 "mergedEntries": len(separated.get("entries") or []),
                 "triggerSearchPasses": (
-                    len(candidates) if find_triggers and separated["entries"] else 0
+                    len(candidates) if find_triggers and searchable_entries else 0
                 ),
                 "triggersFound": sum(
                     bool(value) for value in recovered_triggers.values()
                 ),
+                "constantEntries": len(recovered_constants),
             }
         _clog(f"capture complete ({len(separated['entries'])} lorebook entries)")
         return result

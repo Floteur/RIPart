@@ -207,6 +207,7 @@ def build_character_book(
     entries: list[str] | None,
     public_lorebooks: list[dict[str, Any]] | None = None,
     recovered_triggers: dict[str, list[str]] | None = None,
+    recovered_constants: list[str] | set[str] | None = None,
 ) -> dict[str, Any] | None:
     """Assemble a Tavern ``character_book`` from all available lorebook data.
 
@@ -221,6 +222,7 @@ def build_character_book(
     book_entries: list[dict[str, Any]] = []
     public_content: set[str] = set()
     recovered_seen: set[str] = set()
+    recovered_constant_keys = set(recovered_constants or [])
 
     def _add_public(entry: dict[str, Any]) -> None:
         content = entry.get("content")
@@ -286,39 +288,47 @@ def build_character_book(
             if recovered_triggers
             else []
         )
+        constant = key in recovered_constant_keys
         book_entries.append(
             {
                 "id": f"recovered-{order}",
                 "keys": triggers,
                 "secondary_keys": [],
                 "comment": (
+                    "Recovered lore; always active in probe"
+                    if constant
+                    else
                     "Recovered lore; activation inferred by RIPart probe"
                     if triggers
                     else "Recovered lore; original activation is unknown"
                 ),
                 "content": text,
-                "constant": False,
+                "constant": constant,
                 "selective": False,
                 "insertion_order": order,
                 # Inferred keys are verified by a fresh one-key generation;
                 # unknown entries remain disabled for safe manual review.
-                "enabled": bool(triggers),
+                "enabled": bool(triggers or constant),
                 "position": "before_char",
                 "case_sensitive": False,
                 "name": (
-                    "Recovered lore" if triggers else "Recovered lore (disabled)"
+                    "Recovered lore" if (triggers or constant) else "Recovered lore (disabled)"
                 ),
                 "use_regex": False,
                 "extensions": {
                     "ripart": {
                         "recovery": {
                             "trigger_status": (
-                                "inferred" if triggers else "unknown"
+                                "constant"
+                                if constant
+                                else "inferred"
+                                if triggers
+                                else "unknown"
                             ),
                             "inferred_keys": triggers,
                             **(
                                 {}
-                                if triggers
+                                if triggers or constant
                                 else {
                                     "reason_disabled": "original activation conditions unavailable"
                                 }
@@ -418,6 +428,7 @@ def build_card_v2(
     meta: dict[str, Any] | None = None,
     public_lorebooks: list[dict[str, Any]] | None = None,
     recovered_triggers: dict[str, list[str]] | None = None,
+    recovered_constants: list[str] | set[str] | None = None,
     source_url: str = "",
 ) -> dict[str, Any]:
     """Assemble a Tavern ``chara_card_v2`` dict with the lorebook embedded.
@@ -442,7 +453,9 @@ def build_card_v2(
         "alternate_greetings": character.get("alternateGreetings") or [],
         "extensions": _card_provenance(meta, source_url, character),
     }
-    book = build_character_book(entries, public_lorebooks, recovered_triggers)
+    book = build_character_book(
+        entries, public_lorebooks, recovered_triggers, recovered_constants
+    )
     if book is not None:
         data["character_book"] = book
     return {"spec": "chara_card_v2", "spec_version": "2.0", "data": data}
@@ -455,6 +468,7 @@ def build_card_v3(
     meta: dict[str, Any] | None = None,
     public_lorebooks: list[dict[str, Any]] | None = None,
     recovered_triggers: dict[str, list[str]] | None = None,
+    recovered_constants: list[str] | set[str] | None = None,
     source_url: str = "",
     timestamp: int | None = None,
 ) -> dict[str, Any]:
@@ -497,7 +511,9 @@ def build_card_v3(
         "modification_date": timestamp,
         "extensions": _card_provenance(meta, source_url, character),
     }
-    book = build_character_book(entries, public_lorebooks, recovered_triggers)
+    book = build_character_book(
+        entries, public_lorebooks, recovered_triggers, recovered_constants
+    )
     if book is not None:
         data["character_book"] = book
     return {"spec": "chara_card_v3", "spec_version": "3.0", "data": data}
@@ -601,6 +617,7 @@ def save_to_library(
     meta = result.get("meta") or {}
     public_lorebooks = result.get("publicLorebooks") or []
     recovered_triggers = result.get("recoveredTriggers") or {}
+    recovered_constants = result.get("recoveredConstants") or []
     source_url = result.get("url") or ""
     card_v3 = build_card_v3(
         character,
@@ -608,6 +625,7 @@ def save_to_library(
         meta=meta,
         public_lorebooks=public_lorebooks,
         recovered_triggers=recovered_triggers,
+        recovered_constants=recovered_constants,
         source_url=source_url,
     )
     card_v2 = build_card_v2(
@@ -616,6 +634,7 @@ def save_to_library(
         meta=meta,
         public_lorebooks=public_lorebooks,
         recovered_triggers=recovered_triggers,
+        recovered_constants=recovered_constants,
         source_url=source_url,
     )
 

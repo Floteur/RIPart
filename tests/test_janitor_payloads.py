@@ -59,4 +59,15 @@ def test_trigger_search_messages_prioritize_headings_and_distinctive_words():
     candidates = [candidate for candidate, _message in probes]
     assert candidates[0] == "NEIGHBORHOOD CORE RULES"
     assert "NEIGHBORHOOD" in candidates
-    assert all(candidate in message for candidate, message in probes)
+    assert all(candidate == message for candidate, message in probes)
+
+
+def test_trigger_search_messages_are_distributed_across_entries():
+    probes = build_trigger_search_messages(
+        ["FIRST RULE\nMany first words.", "SECOND RULE\nMany second words."]
+    )
+
+    assert [candidate for candidate, _message in probes[:2]] == [
+        "FIRST RULE",
+        "SECOND RULE",
+    ]
