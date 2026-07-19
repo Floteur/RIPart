@@ -9,6 +9,7 @@ Run ``rip --help`` (or ``python -m ripart --help``) to get started.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -66,8 +67,18 @@ click.rich_click.MAX_WIDTH = 100
 # Group the sub-commands into tidy, labelled panels in `rip --help`.
 click.rich_click.COMMAND_GROUPS = {
     "rip": [
-        {"name": "Session & login", "commands": ["status", "login", "import-session"]},
-        {"name": "Ripping", "commands": ["inspect", "extract", "recent"]},
+        {"name": "JanitorAI", "commands": ["janitor"]},
+        {
+            "name": "JanitorAI (legacy aliases)",
+            "commands": [
+                "status",
+                "login",
+                "import-session",
+                "inspect",
+                "extract",
+                "recent",
+            ],
+        },
         {"name": "Saucepan", "commands": ["saucepan"]},
         {"name": "Clank", "commands": ["clank"]},
         {"name": "Spicychat", "commands": ["spicychat"]},
@@ -107,6 +118,33 @@ def _field(label: str, value: object) -> None:
 
 def _path(label: str, value: object) -> None:
     console.print(f"  [dim]{label}:[/] [cyan]{value}[/]")
+
+
+def _library_has_card(
+    library_dir: Path, character_id: object, *, source_url: str = ""
+) -> bool:
+    """Whether a provider item already has a saved library card.
+
+    The library is UUID-keyed, so checking the card itself avoids a duplicate
+    network fetch and also works when the optional index is absent or stale.
+    """
+    identifier = str(character_id or "").strip()
+    if identifier and (library_dir / f"{identifier}.png").is_file():
+        return True
+    if not source_url:
+        return False
+    try:
+        index = json.loads((library_dir / "index.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(index, dict):
+        return False
+    return any(
+        isinstance(entry, dict)
+        and entry.get("url") == source_url
+        and (library_dir / str(entry.get("file") or "")).is_file()
+        for entry in index.values()
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -184,14 +222,15 @@ def main() -> None:
     use their native APIs. Typical JanitorAI flow:
 
     \b
-      1. rip login                     log in once (reused afterwards)
-      2. rip status                    confirm you are logged in
-      3. rip inspect <url>             peek at a character's public metadata
-      4. rip extract <url>             rip the full card + lorebook
+      1. rip janitor login             log in once (reused afterwards)
+      2. rip janitor status            confirm you are logged in
+      3. rip janitor inspect <url>     peek at a character's public metadata
+      4. rip janitor extract <url>     rip the full card + lorebook
 
     [bold]rip extract <url>[/] also accepts Saucepan and clank.world URLs; see
-    [bold]rip saucepan[/] and [bold]rip clank[/] for their own login/extract
-    commands. Results are written under [cyan]output/cli/[/]. Run
+    [bold]rip saucepan[/], [bold]rip clank[/], and [bold]rip spicychat[/] for
+    their own login/extract commands. The original root-level JanitorAI commands
+    remain available as aliases. Results are written under [cyan]output/cli/[/]. Run
     [bold]rip COMMAND --help[/] for details on any command.
     """
 
@@ -209,7 +248,7 @@ def status(headed: bool) -> None:
     if result.get("loggedIn"):
         _ok("logged in")
         sys.exit(0)
-    _no("not logged in - run [bold]rip login[/] first")
+    _no("not logged in - run [bold]rip janitor login[/] first")
     sys.exit(1)
 
 
@@ -484,11 +523,11 @@ def inspect(url: str, headed: bool) -> None:
     help="Send only one full card trigger (skip the extra keyword passes).",
 )
 @click.option(
-    "--jllm-leak",
-    is_flag=True,
-    default=False,
-    help="For allow_proxy=false characters: reconstruct the definition via a "
-    "JanitorLLM injection leak (lossy; marked reconstructed-jllm).",
+    "--jllm-leak/--no-jllm-leak",
+    default=True,
+    show_default=True,
+    help="For allow_proxy=false characters, reconstruct the definition with the "
+    "multi-pass JanitorLLM fallback (lossy; marked reconstructed-jllm).",
 )
 @verbose_option
 @headed_option
@@ -506,7 +545,7 @@ def extract(
     """Rip a character's private card + lorebook via generateAlpha.
 
     URL can be a full JanitorAI character URL or just its UUID. Requires an
-    active login (see [bold]rip login[/]). Works entirely through direct API
+    active login (see [bold]rip janitor login[/]). Works entirely through direct API
     calls (no chat UI), so it is fast. Stores a single self-contained card PNG
     (V3 card + embedded lorebook) at [cyan]output/cli/library/<uuid>.png[/].
 
@@ -559,6 +598,10 @@ def extract(
         f"extracted [bold]{result.get('characterName') or result.get('characterId') or url}[/]"
     )
     _path("card png", paths["png"])
+    if paths.get("discord_thread"):
+        _field("Discord forum", f"published to thread {paths['discord_thread']}")
+    elif paths.get("discord_error"):
+        _no(f"Discord publish failed: {paths['discord_error']}")
     _field("entries found", len(result.get("entries") or []))
     if (result.get("character") or {}).get("definitionSource") == "reconstructed-jllm":
         _field("definition", "[yellow]reconstructed via JanitorLLM (lossy)[/]")
@@ -648,11 +691,11 @@ def _print_extract_diagnostics(diagnostics: dict) -> None:
     help="[--extract] Delete the temporary chat if a card fails.",
 )
 @click.option(
-    "--jllm-leak",
-    is_flag=True,
-    default=False,
-    help="[--extract] Also rip allow_proxy=false cards by reconstructing their "
-    "definition via a JanitorLLM injection leak (phase 2; lossy).",
+    "--jllm-leak/--no-jllm-leak",
+    default=True,
+    show_default=True,
+    help="[--extract] Reconstruct allow_proxy=false cards with the multi-pass "
+    "JanitorLLM fallback (phase 2; lossy).",
 )
 @verbose_option
 @headed_option
@@ -675,7 +718,11 @@ def recent(
     full-rip every listed card into the UUID-keyed library as
     [cyan]output/cli/library/<uuid>.png[/] (this creates a temporary chat +
     persona per card and toggles your profile into extraction mode, restoring
-    it after). Cards already in the library are skipped unless [bold]--force[/].
+    it after). Each successful card is saved immediately, so completed captures
+    survive an interrupted batch. The extractor automatically uses metadata when
+    complete, the exact proxy capture for proxy-enabled cards (including closed
+    lorebooks), and the multi-pass JanitorLLM fallback when proxies are disabled.
+    Cards already in the library are skipped unless [bold]--force[/].
     """
     # UUIDs already ripped - the task skips these unless --force.
     library_dir = OUT / "library"
@@ -693,6 +740,7 @@ def recent(
             "extract": do_extract,
             "force": force,
             "existing": existing,
+            "checkpoint_library_dir": str(library_dir),
             "verbose": verbose,
             "max_trigger_passes": 1 if no_multi_trigger else max_trigger_passes,
             "trigger_chunk_size": trigger_chunk_size,
@@ -774,14 +822,21 @@ def _write_extracts(extracted: list) -> None:
             _no(f"{entry.get('name')} - {entry.get('error')}")
             continue
         result = entry.get("result") or {}
-        paths = save_to_library(
+        paths = entry.get("saved_paths") or save_to_library(
             OUT / "library", result.get("characterId") or "", result
         )
         secs = entry.get("seconds")
         timing = f" [dim]({secs}s)[/]" if secs is not None else ""
         tag = " [yellow](jllm-reconstructed)[/]" if entry.get("reconstructed") else ""
+        discord = (
+            f" · Discord thread {paths['discord_thread']}"
+            if paths.get("discord_thread")
+            else f" · [red]Discord failed: {paths['discord_error']}[/]"
+            if paths.get("discord_error")
+            else ""
+        )
         _ok(
-            f"{result.get('characterName') or entry.get('name')}{tag} - {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]"
+            f"{result.get('characterName') or entry.get('name')}{tag} - {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]{discord}"
         )
 
 
@@ -799,6 +854,38 @@ def _fmt_duration(seconds: float) -> str:
         return f"{seconds:.1f}s"
     minutes, secs = divmod(int(round(seconds)), 60)
     return f"{minutes}m{secs:02d}s"
+
+
+# --------------------------------------------------------------------------- #
+# janitor
+# --------------------------------------------------------------------------- #
+
+
+@main.group(cls=click.RichGroup)
+def janitor() -> None:
+    """Rip characters from [bold]JanitorAI[/] through its browser-backed API.
+
+    Typical flow:
+
+    \b
+      1. rip janitor login
+      2. rip janitor status
+      3. rip janitor list
+      4. rip janitor extract <url>
+
+    The root-level [bold]rip login[/], [bold]rip extract[/], and related JanitorAI
+    commands remain supported as backwards-compatible aliases.
+    """
+
+
+# JanitorAI predates the provider groups, so these commands were originally
+# registered directly on `rip`. Register the same command objects here rather
+# than maintaining two wrappers whose options could drift apart.
+for _janitor_command in (status, login, import_session, inspect, extract, recent):
+    janitor.add_command(_janitor_command)
+# Provider groups use `list`; retain `recent` too because it describes the
+# ordering and preserves the original JanitorAI command name.
+janitor.add_command(recent, "list")
 
 
 # --------------------------------------------------------------------------- #
@@ -886,12 +973,20 @@ def saucepan_logout() -> None:
     help="Exclude a tag (repeatable).",
 )
 @click.option("--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW companions.")
+@click.option(
+    "--extract",
+    "do_extract",
+    is_flag=True,
+    default=False,
+    help="Rip each listed companion into the library; existing cards are skipped.",
+)
 def saucepan_list(
     limit: int,
     offset: int,
     tags: tuple[str, ...],
     excluded_tags: tuple[str, ...],
     nsfw: bool,
+    do_extract: bool,
 ) -> None:
     """Browse newest Saucepan companions with URLs usable by [bold]extract[/]."""
     try:
@@ -939,6 +1034,24 @@ def saucepan_list(
     total_count = result.get("total_count")
     total = str(total_count) if isinstance(total_count, int) else "?"
     _field("listed", f"{len(companions)} of {total} companion(s) (offset={offset})")
+
+    if do_extract:
+        library_dir = OUT / "library"
+        saved = skipped = 0
+        for companion in companions:
+            companion_id = str(companion.get("id") or companion.get("companion_id") or "")
+            if _library_has_card(library_dir, companion_id):
+                skipped += 1
+                continue
+            try:
+                extracted = sp.extract_companion(companion_id)
+                save_to_library(library_dir, extracted.get("characterId") or companion_id, extracted)
+                saved += 1
+            except sp.SaucepanError as exc:
+                err_console.print(
+                    f"[yellow]![/] {companion.get('display_name') or companion.get('name')}: {exc}"
+                )
+        _ok(f"saved [bold]{saved}[/] card(s); skipped [bold]{skipped}[/] existing card(s) to {library_dir}")
 
 
 @saucepan.command("providers")
@@ -1312,7 +1425,8 @@ def clank_logout() -> None:
     is_flag=True,
     default=False,
     help="Save a partial card for each listed story (public data only — name, "
-    "scenario, greetings, tags, avatar; the definition stays gated). Marked clank-partial.",
+    "scenario, greetings, tags, avatar; the definition stays gated). Existing cards are skipped. "
+    "Marked clank-partial.",
 )
 def clank_list(
     sort: str, limit: int, tags: tuple[str, ...], nsfw: bool, page_size: int, do_extract: bool
@@ -1368,15 +1482,24 @@ def clank_list(
 
     if do_extract:
         library_dir = OUT / "library"
-        saved = 0
+        saved = skipped = 0
         for it in items:
+            story_id = str(it.get("agent_id") or it.get("id") or "")
+            if _library_has_card(
+                library_dir, story_id, source_url=ck.story_character_url(it)
+            ):
+                skipped += 1
+                continue
             try:
                 result = ck.extract_story(it)
-                save_to_library(library_dir, result.get("characterId") or "", result)
+                save_to_library(library_dir, result.get("characterId") or story_id, result)
                 saved += 1
             except ck.ClankError as exc:
                 err_console.print(f"[yellow]![/] {it.get('agent_name')}: {exc}")
-        _ok(f"saved [bold]{saved}[/] partial card(s) to {library_dir} [dim](clank-partial)[/]")
+        _ok(
+            f"saved [bold]{saved}[/] partial card(s); skipped [bold]{skipped}[/] existing card(s) "
+            f"to {library_dir} [dim](clank-partial)[/]"
+        )
 
 
 @clank.command("extract")
@@ -1625,7 +1748,7 @@ def _catalogue_options(func):
         is_flag=True,
         default=False,
         help="Also rip each listed character into the library (full card when the "
-        "definition is public, else a spicychat-partial card).",
+        "definition is public, else a spicychat-partial card). Existing cards are skipped.",
     )(func)
     return verbose_option(func)
 
@@ -1719,16 +1842,19 @@ def _spicychat_list(
 
     if do_extract:
         library_dir = OUT / "library"
-        saved = 0
+        saved = skipped = 0
         for doc in hits:
             cid = str(doc.get("character_id") or "")
+            if _library_has_card(library_dir, cid):
+                skipped += 1
+                continue
             try:
                 res = sc.extract_character(cid)
                 save_to_library(library_dir, res.get("characterId") or cid, res)
                 saved += 1
             except sc.SpicyChatError as exc:
                 err_console.print(f"[yellow]![/] {doc.get('name')}: {exc}")
-        _ok(f"saved [bold]{saved}[/] card(s) to {library_dir}")
+        _ok(f"saved [bold]{saved}[/] card(s); skipped [bold]{skipped}[/] existing card(s) to {library_dir}")
 
 
 @spicychat.command("extract")

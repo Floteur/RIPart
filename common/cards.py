@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .text import norm, write_json
+from .text import norm, normalize_user_placeholder, write_json
 
 # Longest-side cap (px) for stored card portraits - keeps library PNGs small.
 CARD_MAX_DIM = 512
@@ -134,7 +134,7 @@ def build_character_book(
     seen: set[str] = set()
 
     def _add(content: str, *, keys, secondary, comment, constant, enabled):
-        text = str(content or "").strip()
+        text = normalize_user_placeholder(str(content or "").strip())
         if not text:
             return
         key = norm(text)
@@ -430,4 +430,6 @@ def save_to_library(
     published = publish_card(character_id, result, png_path)
     if published and published.get("thread_id"):
         paths["discord_thread"] = published["thread_id"]
+    elif published and published.get("action") == "error":
+        paths["discord_error"] = published.get("error") or "unknown Discord error"
     return paths

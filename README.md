@@ -32,10 +32,10 @@ python -m ripart --help    # as a module
 ## Quickstart
 
 ```bash
-rip login            # 1. log in once - the session is saved and reused
-rip status           # 2. confirm you're logged in
-rip inspect <url>    # 3. peek at a character's public metadata
-rip extract <url>    # 4. rip the full card + lorebook
+rip janitor login            # 1. log in once - the session is saved and reused
+rip janitor status           # 2. confirm you're logged in
+rip janitor inspect <url>    # 3. peek at a character's public metadata
+rip janitor extract <url>    # 4. rip the full card + lorebook
 ```
 
 `<url>` can be a full JanitorAI character URL **or** just its UUID.
@@ -102,11 +102,14 @@ Run `rip COMMAND --help` for the full, colour-coded help of any command.
 
 | Command | What it does |
 | --- | --- |
-| `rip status` | Check whether the browser profile is logged in. Exit code `0` = yes, `1` = no. |
-| `rip login` | Open JanitorAI and wait for you to sign in. `--timeout SECONDS` (default 180). |
-| `rip import-session PATH` | Import a cookie/localStorage JSON dump into the profile - handy on headless servers where you can't log in interactively. |
-| `rip inspect URL` | Fetch a character's public metadata and public lorebooks (read-only). Writes `output/cli/inspections/<name>.json`. |
-| `rip extract URL` | Rip the private card + lorebook via `generateAlpha`. Writes the capture, raw lorebook, character card, and avatar under `output/cli/extracts/<name>/`. A `saucepan.ai`, `clank.world`, `spicychat.ai`, `chub.ai`/`character-tavern.com`, or direct card-file URL is routed to the matching path below. |
+| `rip janitor …` | Rip characters from [JanitorAI](https://janitorai.com) through its browser-backed API. Use `rip janitor login`, `status`, `list`, `inspect`, or `extract`. |
+| `rip janitor list` | List the newest JanitorAI characters; add `--extract` to rip them. Extraction automatically prefers public metadata, then the exact proxy/lorebook path, then a multi-pass JanitorLLM reconstruction when proxies are disabled. `rip janitor recent` remains available as an equivalent alias. |
+| `rip janitor status` | Check whether the JanitorAI browser profile is logged in. Exit code `0` = yes, `1` = no. |
+| `rip janitor login` | Open JanitorAI and wait for you to sign in. `--timeout SECONDS` (default 180). |
+| `rip janitor import-session PATH` | Import a cookie/localStorage JSON dump into the profile - handy on headless servers where you can't log in interactively. |
+| `rip janitor inspect URL` | Fetch a character's public metadata and public lorebooks (read-only). Writes `output/cli/inspections/<name>.json`. |
+| `rip janitor extract URL` | Rip the private card + lorebook via `generateAlpha`. Writes the capture, raw lorebook, character card, and avatar under `output/cli/extracts/<name>/`. |
+| `rip extract URL` | Route a Saucepan, clank.world, spicychat.ai, chub.ai/character-tavern.com, or direct card-file URL to its matching extractor. JanitorAI is also accepted as a legacy alias for `rip janitor extract`. |
 | `rip saucepan …` | Rip companions from [Saucepan](https://saucepan.ai) via its REST API (no browser). See below. |
 | `rip clank …` | Rip characters from [clank.world](https://clank.world) via its API (no browser). See below. |
 | `rip spicychat …` | Rip characters from [spicychat.ai](https://spicychat.ai) via its API (no browser, no login). See below. |
@@ -145,6 +148,7 @@ reconstruction. Log in once (the bearer token is saved to a gitignored
 rip saucepan login                 # store a bearer token (prompts for username + password)
 rip saucepan status                # confirm a token is configured & unexpired (exit 0 = yes, 1 = no)
 rip saucepan list                  # browse newest companions and extract-ready URLs
+rip saucepan list --extract        # save the listed cards; already-saved cards are skipped
 rip saucepan extract <url>         # rip a companion card + lorebooks (URL or bare companion id)
 rip saucepan extract <url> --no-lorebooks   # card only, skip attached lorebooks
 rip saucepan logout                # forget the stored token
@@ -274,6 +278,10 @@ Notes and caveats:
 ### Examples
 
 ```bash
+# Log in to JanitorAI once, then rip a character by UUID
+rip janitor login
+rip janitor extract 12345678-90ab-cdef-1234-567890abcdef
+
 # Rip a character by UUID
 rip extract 12345678-90ab-cdef-1234-567890abcdef
 

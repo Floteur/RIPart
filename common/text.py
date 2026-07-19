@@ -18,6 +18,39 @@ def norm(value: str) -> str:
     return re.sub(r"\s+", " ", value or "").strip().lower()
 
 
+def normalize_sillytavern_identity_macros(value: str) -> str:
+    """Canonicalise malformed Janitor/SillyTavern user and character macros.
+
+    Prompt captures sometimes add or lose braces around ``user``/``char``, e.g.
+    ``{user}``, ``{{{char}}}``, or even longer runs. The documented legacy
+    ``<USER>``, ``<BOT>``, and ``<CHAR>`` forms are also made explicit. We
+    deliberately leave every other braced token untouched: it may be literal
+    text, JSON-like notation, or an extension-defined macro.
+    """
+    aliases = {"user": "user", "char": "char", "bot": "char"}
+
+    def replace_braced(match: re.Match[str]) -> str:
+        return "{{" + aliases[match.group(1).lower()] + "}}"
+
+    text = re.sub(
+        r"(?:\{\s*)+(user|char|bot)(?:\s*\})+",
+        replace_braced,
+        value or "",
+        flags=re.I,
+    )
+    return re.sub(
+        r"<(USER|BOT|CHAR)>",
+        lambda match: "{{" + aliases[match.group(1).lower()] + "}}",
+        text,
+        flags=re.I,
+    )
+
+
+def normalize_user_placeholder(value: str) -> str:
+    """Backward-compatible name for identity-macro canonicalisation."""
+    return normalize_sillytavern_identity_macros(value)
+
+
 def safe_name(name: str, fallback: str) -> str:
     clean = re.sub(r"[^\w.\- ]+", "_", (name or "").strip() or fallback)
     return clean[:80].strip() or fallback

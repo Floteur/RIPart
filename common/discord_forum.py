@@ -30,6 +30,8 @@ from typing import Any
 
 import httpx
 
+from .text import normalize_user_placeholder
+
 # Project root (parent of this ``common/`` package) — where ``.env`` lives.
 _ROOT = Path(__file__).resolve().parent.parent
 _ENV_PATH = _ROOT / ".env"
@@ -45,6 +47,9 @@ _UUID_RE = re.compile(
 # Forum-title hard cap and per-post applied-tag cap (both Discord limits).
 _TITLE_CAP = 100
 _MAX_APPLIED_TAGS = 5
+_EMBED_DESCRIPTION_CAP = 4000
+_EMBEDS_PER_MESSAGE_CAP = 10
+_EMBED_MESSAGE_CHAR_CAP = 6000
 
 # URL substring → platform tag name (matches the forum's platform tags).
 _PLATFORMS: tuple[tuple[str, str], ...] = (
@@ -155,15 +160,166 @@ def _tags_for(
     return ids
 
 
-def _body_for(name: str, meta: dict[str, Any], url: str) -> str:
-    """The message content posted alongside the card PNG (kept well under 2000)."""
-    lines = [f"**{(name or 'Character').strip()}**"]
+def _embed_for(
+    *,
+    name: str,
+    url: str,
+    card_tags: list[Any],
+    meta: dict[str, Any],
+    definition_source: str,
+    image_filename: str,
+) -> dict[str, Any]:
+    """Build the readable forum-card embed posted with the downloadable PNG."""
+    clean_name = (name or "Character").strip()[:256]
+    platform = _platform_of(url) or "unknown"
+    tags = ", ".join(str(tag).strip() for tag in card_tags if str(tag).strip())
+    source = (definition_source or "unknown").strip()
+    fields = [
+        {"name": "Platform", "value": platform, "inline": True},
+        {
+            "name": "NSFW",
+            "value": "yes" if (meta or {}).get("is_nsfw") else "no",
+            "inline": True,
+        },
+        {"name": "Definition", "value": source[:1024], "inline": True},
+    ]
+    if url:
+        fields.append({"name": "Source", "value": url[:1024], "inline": False})
+    if tags:
+        fields.append(
+            {
+                "name": f"Card tags ({len(card_tags)})",
+                "value": tags[:1024],
+                "inline": False,
+            }
+        )
     creator = (meta or {}).get("creator_name")
     if creator:
-        lines.append(f"by {creator}")
-    if url:
-        lines.append(f"<{url}>")
-    return "\n".join(lines)[:1900]
+        fields.append({"name": "Creator", "value": str(creator)[:1024], "inline": True})
+    return {
+        "title": clean_name,
+        "url": url or None,
+        "fields": fields,
+        "image": {"url": f"attachment://{image_filename}"},
+        "footer": {"text": "ripart archive"},
+    }
+
+
+def _split_embed_text(text: str) -> list[str]:
+    """Split text into Discord-safe embed descriptions, favouring line breaks."""
+    text = str(text or "").strip()
+    if not text:
+        return []
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > _EMBED_DESCRIPTION_CAP:
+        cut = remaining.rfind("\n", 0, _EMBED_DESCRIPTION_CAP + 1)
+        if cut <= 0:
+            cut = remaining.rfind(" ", 0, _EMBED_DESCRIPTION_CAP + 1)
+        if cut <= 0:
+            cut = _EMBED_DESCRIPTION_CAP
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _detail_embeds_for(result: dict[str, Any]) -> list[dict[str, Any]]:
+    """Render all recovered card text as follow-up embeds for a forum thread."""
+    character = result.get("character") or {}
+    sections: list[tuple[str, str]] = []
+    for label, key in (
+        ("Definition", "description"),
+        ("Personality", "personality"),
+        ("Scenario", "scenario"),
+        ("First message", "firstMessage"),
+        ("Example dialogue", "exampleMessages"),
+        ("Creator notes", "creatorNotes"),
+    ):
+        value = str(character.get(key) or "").strip()
+        if value:
+            sections.append((label, value))
+
+    for index, entry in enumerate(result.get("entries") or [], start=1):
+        if isinstance(entry, dict):
+            content = str(entry.get("content") or entry.get("text") or "").strip()
+            title = str(entry.get("comment") or entry.get("title") or "").strip()
+        else:
+            content, title = str(entry or "").strip(), ""
+        if content:
+            suffix = f" — {title}" if title else ""
+            sections.append((f"Extracted lorebook entry {index}{suffix}", content))
+
+    for book_index, book in enumerate(result.get("publicLorebooks") or [], start=1):
+        title = str(book.get("title") or book.get("name") or f"Book {book_index}").strip()
+        entries = (book.get("worldInfo") or {}).get("entries") or {}
+        values = entries.values() if isinstance(entries, dict) else entries
+        for entry_index, entry in enumerate(values, start=1):
+            if not isinstance(entry, dict):
+                continue
+            content = normalize_user_placeholder(
+                str(entry.get("content") or "").strip()
+            )
+            if not content:
+                continue
+            comment = str(entry.get("comment") or entry.get("name") or "").strip()
+            suffix = f" — {comment}" if comment else ""
+            sections.append(
+                (f"Public lorebook: {title} #{entry_index}{suffix}", content)
+            )
+
+    embeds: list[dict[str, Any]] = []
+    for title, content in sections:
+        chunks = _split_embed_text(content)
+        for index, chunk in enumerate(chunks, start=1):
+            chunk_title = title if len(chunks) == 1 else f"{title} ({index}/{len(chunks)})"
+            embeds.append(
+                {
+                    "title": chunk_title[:256],
+                    "description": chunk,
+                    "footer": {"text": "ripart archive"},
+                }
+            )
+    return embeds
+
+
+def _embed_char_count(embed: dict[str, Any]) -> int:
+    """Count the text Discord includes in its 6000-character embed budget."""
+    footer = embed.get("footer") or {}
+    author = embed.get("author") or {}
+    return sum(
+        len(str(value or ""))
+        for value in (
+            embed.get("title"),
+            embed.get("description"),
+            footer.get("text"),
+            author.get("name"),
+        )
+    ) + sum(
+        len(str(field.get("name") or "")) + len(str(field.get("value") or ""))
+        for field in embed.get("fields") or []
+    )
+
+
+def _detail_embed_batches(embeds: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Pack detail embeds under Discord's per-message count and text limits."""
+    batches: list[list[dict[str, Any]]] = []
+    batch: list[dict[str, Any]] = []
+    char_count = 0
+    for embed in embeds:
+        size = _embed_char_count(embed)
+        if batch and (
+            len(batch) >= _EMBEDS_PER_MESSAGE_CAP
+            or char_count + size > _EMBED_MESSAGE_CHAR_CAP
+        ):
+            batches.append(batch)
+            batch, char_count = [], 0
+        batch.append(embed)
+        char_count += size
+    if batch:
+        batches.append(batch)
+    return batches
 
 
 class ForumPublisher:
@@ -284,14 +440,14 @@ class ForumPublisher:
         self,
         *,
         title: str,
-        body: str,
+        embed: dict[str, Any],
         applied_tags: list[str],
         png_path: Path,
     ) -> dict[str, Any] | None:
         payload = {
             "name": title,
             "applied_tags": applied_tags,
-            "message": {"content": body},
+            "message": {"embeds": [embed]},
         }
         resp = self._request(
             "POST",
@@ -303,19 +459,34 @@ class ForumPublisher:
             return resp.json()
         raise RuntimeError(f"create_post HTTP {resp.status_code}: {resp.text[:200]}")
 
-    def reply(self, thread_id: str, *, body: str, png_path: Path) -> dict[str, Any]:
+    def reply(
+        self, thread_id: str, *, embed: dict[str, Any], png_path: Path
+    ) -> dict[str, Any]:
         # A forum post auto-archives; un-archive before appending so the bump
         # sticks (a webhook couldn't wake an archived thread, but the bot can).
         self._request("PATCH", f"/channels/{thread_id}", json_body={"archived": False})
         resp = self._request(
             "POST",
             f"/channels/{thread_id}/messages",
-            data={"payload_json": json.dumps({"content": body})},
+            data={"payload_json": json.dumps({"embeds": [embed]})},
             files=self._png_file(png_path),
         )
         if resp.status_code in (200, 201):
             return resp.json()
         raise RuntimeError(f"reply HTTP {resp.status_code}: {resp.text[:200]}")
+
+    def reply_embeds(
+        self, thread_id: str, *, embeds: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Post a Discord-limit-safe batch of detail embeds after the card."""
+        resp = self._request(
+            "POST",
+            f"/channels/{thread_id}/messages",
+            json_body={"embeds": embeds},
+        )
+        if resp.status_code in (200, 201):
+            return resp.json()
+        raise RuntimeError(f"detail reply HTTP {resp.status_code}: {resp.text[:200]}")
 
     # -- the upsert ------------------------------------------------------- #
 
@@ -327,6 +498,8 @@ class ForumPublisher:
         url: str,
         card_tags: list[Any],
         meta: dict[str, Any],
+        definition_source: str = "",
+        detail_embeds: list[dict[str, Any]] | None = None,
         png_path: Path,
         thread_index: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -338,23 +511,35 @@ class ForumPublisher:
         key = uuid.lower()
         index = self.thread_index() if thread_index is None else thread_index
         existing = index.get(key)
-        body = _body_for(name, meta, url)
+        embed = _embed_for(
+            name=name,
+            url=url,
+            card_tags=card_tags,
+            meta=meta,
+            definition_source=definition_source,
+            image_filename=png_path.name,
+        )
 
         if existing:
             if self.on_duplicate == "skip":
                 return {"action": "skip", "thread_id": existing, "uuid": uuid}
-            self.reply(existing, body=body, png_path=png_path)
+            self.reply(existing, embed=embed, png_path=png_path)
+            for batch in _detail_embed_batches(detail_embeds or []):
+                self.reply_embeds(existing, embeds=batch)
             return {"action": "repost", "thread_id": existing, "uuid": uuid}
 
         platform = _platform_of(url)
         applied = _tags_for(card_tags, platform, self.available_tags())
         created = self.create_post(
             title=_title_for(name, uuid),
-            body=body,
+            embed=embed,
             applied_tags=applied,
             png_path=png_path,
         )
         thread_id = (created or {}).get("id")
+        if thread_id:
+            for batch in _detail_embed_batches(detail_embeds or []):
+                self.reply_embeds(thread_id, embeds=batch)
         if thread_index is not None and thread_id:
             thread_index[key] = thread_id  # keep the shared map fresh in a batch
         return {"action": "create", "thread_id": thread_id, "uuid": uuid}
@@ -382,8 +567,9 @@ def publish_card(
     """Best-effort forum publish for one just-saved card.
 
     Returns the upsert outcome (``{"action", "thread_id", "uuid"}``), or ``None``
-    when publishing is disabled or the UUID is unusable. Never raises — a Discord
-    outage must not break a rip; set ``RIP_DEBUG`` to surface the reason.
+    when publishing is disabled or the UUID is unusable. An attempted but failed
+    publish returns ``{"action": "error", "error": ...}``; it never raises, so a
+    Discord outage cannot break a rip or hide the failure from the CLI.
     """
     if not (character_id and _UUID_RE.fullmatch(character_id)):
         return None  # only real UUIDs get a stable, dedupable title
@@ -398,12 +584,12 @@ def publish_card(
             url=result.get("url") or "",
             card_tags=character.get("tags") or [],
             meta=result.get("meta") or {},
+            definition_source=character.get("definitionSource") or "",
+            detail_embeds=_detail_embeds_for(result),
             png_path=Path(png_path),
         )
     except Exception as exc:  # noqa: BLE001 - publishing is best-effort
-        if os.environ.get("RIP_DEBUG"):
-            print(f"[discord] publish skipped: {exc}", flush=True)
-        return None
+        return {"action": "error", "uuid": character_id, "error": str(exc)}
 
 
 def publish_library(library_dir: Path) -> list[dict[str, Any]]:
@@ -436,6 +622,7 @@ def publish_library(library_dir: Path) -> list[dict[str, Any]]:
                         "creator_name": entry.get("creator") or "",
                         "is_nsfw": entry.get("nsfw"),
                     },
+                    definition_source=entry.get("definitionSource") or "",
                     png_path=png,
                     thread_index=shared,
                 )

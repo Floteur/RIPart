@@ -1,0 +1,135 @@
+"""Pure tests for the Discord forum-card presentation."""
+
+from __future__ import annotations
+
+from ripart.common import discord_forum
+from ripart.common.discord_forum import (
+    ForumPublisher,
+    _detail_embed_batches,
+    _detail_embeds_for,
+    _embed_char_count,
+    _embed_for,
+)
+
+
+def test_embed_for_includes_card_metadata_and_attachment_image():
+    embed = _embed_for(
+        name="Talia & Friends",
+        url="https://spicychat.ai/chatbot/character-id",
+        card_tags=["NSFW", "Roommate", "Female"],
+        meta={"is_nsfw": True, "creator_name": "Creator"},
+        definition_source="spicychat-leak",
+        image_filename="character-id.png",
+    )
+
+    assert embed["title"] == "Talia & Friends"
+    assert embed["url"] == "https://spicychat.ai/chatbot/character-id"
+    assert embed["image"] == {"url": "attachment://character-id.png"}
+    assert embed["footer"] == {"text": "ripart archive"}
+    assert embed["fields"] == [
+        {"name": "Platform", "value": "spicychat", "inline": True},
+        {"name": "NSFW", "value": "yes", "inline": True},
+        {"name": "Definition", "value": "spicychat-leak", "inline": True},
+        {
+            "name": "Source",
+            "value": "https://spicychat.ai/chatbot/character-id",
+            "inline": False,
+        },
+        {
+            "name": "Card tags (3)",
+            "value": "NSFW, Roommate, Female",
+            "inline": False,
+        },
+        {"name": "Creator", "value": "Creator", "inline": True},
+    ]
+
+
+def test_publish_card_reports_discord_errors(monkeypatch, tmp_path):
+    """A failed publish is visible to callers but never aborts card saving."""
+    png_path = tmp_path / "card.png"
+    png_path.write_bytes(b"png")
+
+    class BrokenPublisher:
+        def upsert(self, **_kwargs):
+            raise RuntimeError("Discord rejected the payload")
+
+    monkeypatch.setattr(discord_forum, "_publisher_from_env", lambda: BrokenPublisher())
+    outcome = discord_forum.publish_card(
+        "c49da2b4-2b9c-479a-a99e-2b979cc22f82",
+        {"character": {}},
+        png_path,
+    )
+
+    assert outcome == {
+        "action": "error",
+        "uuid": "c49da2b4-2b9c-479a-a99e-2b979cc22f82",
+        "error": "Discord rejected the payload",
+    }
+
+
+def test_upsert_creates_a_thread_with_the_rich_embed(tmp_path):
+    """The thread-creation payload uses the embed, not the former text body."""
+    png_path = tmp_path / "card.png"
+    png_path.write_bytes(b"png")
+    publisher = object.__new__(ForumPublisher)
+    publisher.on_duplicate = "repost"
+    publisher.thread_index = lambda: {}
+    publisher.available_tags = lambda: {}
+    captured: dict = {}
+
+    def create_post(**kwargs):
+        captured.update(kwargs)
+        return {"id": "thread-id"}
+
+    publisher.create_post = create_post
+    outcome = publisher.upsert(
+        uuid="c49da2b4-2b9c-479a-a99e-2b979cc22f82",
+        name="Card",
+        url="https://janitorai.com/characters/c49da2b4-2b9c-479a-a99e-2b979cc22f82",
+        card_tags=[],
+        meta={},
+        definition_source="proxy",
+        png_path=png_path,
+    )
+
+    assert outcome == {
+        "action": "create",
+        "thread_id": "thread-id",
+        "uuid": "c49da2b4-2b9c-479a-a99e-2b979cc22f82",
+    }
+    assert captured["embed"]["title"] == "Card"
+
+
+def test_detail_embeds_include_definition_and_lorebook_content():
+    embeds = _detail_embeds_for(
+        {
+            "character": {"description": "A full definition.", "scenario": "A scenario."},
+            "entries": ["Recovered private lore."],
+            "publicLorebooks": [
+                {
+                    "title": "Public book",
+                    "worldInfo": {"entries": {"0": {"content": "Public lore."}}},
+                }
+            ],
+        }
+    )
+
+    assert [(embed["title"], embed["description"]) for embed in embeds] == [
+        ("Definition", "A full definition."),
+        ("Scenario", "A scenario."),
+        ("Extracted lorebook entry 1", "Recovered private lore."),
+        ("Public lorebook: Public book #1", "Public lore."),
+    ]
+
+
+def test_detail_embed_batches_obey_discord_message_limits():
+    embeds = [
+        {"title": f"Entry {index}", "description": "x" * 1000, "footer": {"text": "ripart archive"}}
+        for index in range(12)
+    ]
+
+    batches = _detail_embed_batches(embeds)
+
+    assert len(batches) == 3
+    assert all(len(batch) <= 10 for batch in batches)
+    assert all(sum(_embed_char_count(embed) for embed in batch) <= 6000 for batch in batches)

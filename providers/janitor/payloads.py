@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from ...common.text import html_to_text, split_text_chunks
+from ...common.text import html_to_text, normalize_user_placeholder, split_text_chunks
 from ...common.text import norm as _norm
 
 ORIGIN = "https://janitorai.com"
@@ -244,7 +244,7 @@ def merge_separated_results(separations: list[dict[str, Any]]) -> dict[str, Any]
                 if key in seen:
                     continue
                 seen.add(key)
-                blocks.append(text)
+                blocks.append(normalize_user_placeholder(text))
     lorebook_text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(blocks)).strip()
     return {
         "lorebookText": lorebook_text,
@@ -298,6 +298,7 @@ def separate(
                     )
             lorebook_text = re.sub(r"[ \t]+\n", "\n", lorebook_text)
             lorebook_text = re.sub(r"\n{3,}", "\n\n", lorebook_text).strip()
+    lorebook_text = normalize_user_placeholder(lorebook_text)
     return {
         "systemContent": system_content,
         "lorebookText": lorebook_text,
@@ -315,7 +316,7 @@ def collect_greetings(
     out: list[str] = []
 
     def push(value: Any) -> None:
-        text = str(value or "").strip()
+        text = normalize_user_placeholder(str(value or "").strip())
         if text and text not in out:
             out.append(text)
 
@@ -353,19 +354,23 @@ def build_character(
     return {
         "name": extract_char_name(payload or {}) or meta.get("name") or "",
         "avatarBase64": avatar_base64 or "",
-        "description": (meta.get("personality") or "").strip()
+        "description": normalize_user_placeholder((meta.get("personality") or "").strip())
         if public
-        else (extract_card(payload or {}) or card or ""),
+        else normalize_user_placeholder(extract_card(payload or {}) or card or ""),
         "personality": "",
-        "scenario": (meta.get("scenario") or "").strip()
+        "scenario": normalize_user_placeholder((meta.get("scenario") or "").strip())
         if public
-        else (extract_scenario(payload or {}) or meta.get("scenario") or ""),
+        else normalize_user_placeholder(
+            extract_scenario(payload or {}) or meta.get("scenario") or ""
+        ),
         "firstMessage": greetings[0] if greetings else "",
         "alternateGreetings": greetings[1:],
-        "exampleMessages": (meta.get("example_dialogs") or "").strip()
+        "exampleMessages": normalize_user_placeholder(
+            (meta.get("example_dialogs") or "").strip()
+        )
         if public
-        else extract_example(payload or {}),
-        "creatorNotes": meta.get("description") or "",
+        else normalize_user_placeholder(extract_example(payload or {})),
+        "creatorNotes": normalize_user_placeholder(meta.get("description") or ""),
         "tags": meta.get("custom_tags") or [],
         "definitionSource": "janitor" if public else "reconstructed",
     }

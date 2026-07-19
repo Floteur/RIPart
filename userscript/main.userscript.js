@@ -288,45 +288,19 @@
             const ids = [...collectedIds];
             if (!ids.length) return;
 
+            const importUrl = new URL("https://datacat.run/");
+            importUrl.hash = new URLSearchParams({
+                janitorIds: ids.join(",")
+            }).toString();
             const target = window.open(
-                "https://datacat.run/?janitor-import=1",
+                importUrl.href,
                 "datacat-janitor-import"
             );
             if (!target) {
                 status.textContent = "Could not open Datacat. Allow pop-ups, then try again.";
                 return;
             }
-
-            let timeoutId = null;
-            const cleanup = () => {
-                window.removeEventListener("message", onMessage);
-                if (timeoutId !== null) clearTimeout(timeoutId);
-            };
-            const onMessage = (event) => {
-                if (event.source !== target || event.origin !== "https://datacat.run") {
-                    return;
-                }
-                if (event.data?.type === "datacat:janitor-ready") {
-                    target.postMessage(
-                        { type: "datacat:janitor-import", ids },
-                        event.origin
-                    );
-                    return;
-                }
-                if (event.data?.type === "datacat:janitor-imported") {
-                    cleanup();
-                    status.textContent = event.data.busy
-                        ? "Datacat is busy. Finish or stop its current queue, then send again."
-                        : `Sent ${event.data.count} ID${event.data.count === 1 ? "" : "s"} to Datacat.`;
-                }
-            };
-
-            window.addEventListener("message", onMessage);
-            timeoutId = setTimeout(() => {
-                cleanup();
-                status.textContent = "Datacat opened, but did not confirm the import. Use Copy UUIDs if needed.";
-            }, 10000);
-            status.textContent = `Sending ${ids.length} ID${ids.length === 1 ? "" : "s"} to Datacat…`;
+            status.textContent = `Opened Datacat with ${ids.length} ID${ids.length === 1 ? "" : "s"} ready to import.`;
         }
 
         function toggleScanning() {
@@ -372,11 +346,14 @@
     const CONFIG = Object.freeze({
         storageKey: "datacat_bulk_retriever_v1",
         jobStorageKey: "datacat_bulk_retriever_job_v1",
+        existingCacheStorageKey: "datacat_bulk_retriever_existing_ids_v1",
         defaultDelayMs: 5000,
         defaultRetries: 3,
         requestTimeoutMs: 45000,
         fallbackRateLimitMs: 15000,
         maxBackoffMs: 120000,
+        existenceCheckConcurrency: 2,
+        existingCacheMaxEntries: 5000,
         maxLogLines: 400,
         saveDebounceMs: 400
     });
@@ -395,6 +372,7 @@
 
     let latestQueueCapacity = null;
     let saveTimer = null;
+    let existingCacheSaveTimer = null;
     /** Filled in after panel mount; safe optional access before then. */
     let elements = null;
 
@@ -460,6 +438,46 @@
     function saveSettingsDebounced(patch = {}) {
         clearTimeout(saveTimer);
         saveTimer = setTimeout(() => saveSettings(patch), CONFIG.saveDebounceMs);
+    }
+
+    function loadExistingIdCache() {
+        try {
+            const cached = JSON.parse(
+                localStorage.getItem(CONFIG.existingCacheStorageKey) || "[]"
+            );
+            const ids = Array.isArray(cached) ? cached : [];
+            const cache = new Map();
+            for (const id of ids) {
+                if (typeof id === "string") cache.set(id, true);
+            }
+            while (cache.size > CONFIG.existingCacheMaxEntries) {
+                cache.delete(cache.keys().next().value);
+            }
+            return cache;
+        } catch {
+            return new Map();
+        }
+    }
+
+    const existingIdCache = loadExistingIdCache();
+
+    function saveExistingIdCache() {
+        existingCacheSaveTimer = null;
+        localStorage.setItem(
+            CONFIG.existingCacheStorageKey,
+            JSON.stringify([...existingIdCache.keys()])
+        );
+    }
+
+    function cacheExistingId(id) {
+        existingIdCache.delete(id);
+        existingIdCache.set(id, true);
+        while (existingIdCache.size > CONFIG.existingCacheMaxEntries) {
+            existingIdCache.delete(existingIdCache.keys().next().value);
+        }
+        if (existingCacheSaveTimer === null) {
+            existingCacheSaveTimer = setTimeout(saveExistingIdCache, 250);
+        }
     }
 
     function loadJob() {
@@ -1260,6 +1278,16 @@
         return { count: imported.length, total: ids.length };
     }
 
+    function importJanitorIdsFromHash() {
+        const params = new URLSearchParams(location.hash.slice(1));
+        const encodedIds = params.get("janitorIds");
+        if (!encodedIds) return;
+
+        const result = importJanitorIds(encodedIds.split(","));
+        history.replaceState(null, "", `${location.pathname}${location.search}`);
+        return result;
+    }
+
     function readOptions() {
         const delaySeconds = Number(elements.delay.value);
         const retries = Number(elements.retries.value);
@@ -1343,7 +1371,7 @@
         }
 
         elements.pause.textContent = "Pause";
-        updateProgress(resumeFrom, ids.length);
+        updateProgress(state.results.length, ids.length);
         updateStats();
         setRunningUi(true);
 
@@ -1355,29 +1383,81 @@
 
         const shouldCheckExisting =
             options.skipExisting && !options.alwaysReextract;
-        const existenceChecks = new Map();
-        const prefetchExistence = (index) => {
-            if (
-                !shouldCheckExisting ||
-                index >= ids.length ||
-                existenceChecks.has(index)
+        const existingStatuses = new Map();
+        const completedIds = new Set(state.results.map((result) => result.id));
+        const startedIds = new Set();
+        let nextExistenceCheckIndex = resumeFrom;
+        let activeExistenceChecks = 0;
+        let queueRefreshTimer = null;
+        const refreshQueueWithoutKnownExisting = () => {
+            const { ids: queuedIds } = parseCharacterIds(elements.input.value);
+            const remainingIds = queuedIds.filter((id) => {
+                const status = existingStatuses.get(id);
+                return status !== true && status !== "deleted";
+            });
+            if (remainingIds.length === queuedIds.length) return;
+            elements.input.value = remainingIds.join("\n");
+            updateCount();
+        };
+        const scheduleQueueRefresh = () => {
+            if (queueRefreshTimer !== null) return;
+            queueRefreshTimer = setTimeout(() => {
+                queueRefreshTimer = null;
+                refreshQueueWithoutKnownExisting();
+            }, 100);
+        };
+        const fillExistenceCheckQueue = () => {
+            while (
+                shouldCheckExisting &&
+                !state.stopping &&
+                activeExistenceChecks < CONFIG.existenceCheckConcurrency &&
+                nextExistenceCheckIndex < ids.length
             ) {
-                return;
-            }
-            existenceChecks.set(
-                index,
-                characterExists(ids[index], options.retries).then(
-                    (value) => ({ value }),
-                    (error) => ({ error })
+                const index = nextExistenceCheckIndex++;
+                activeExistenceChecks++;
+                const id = ids[index];
+                const cachedExisting = existingIdCache.has(id);
+                const check = (cachedExisting
+                    ? Promise.resolve(true)
+                    : characterExists(id, options.retries)
                 )
-            );
+                    .then(
+                        (value) => {
+                            existingStatuses.set(id, value);
+                            if (value === true && !cachedExisting) {
+                                cacheExistingId(id);
+                            }
+                            if (value !== true && value !== "deleted") {
+                                return { value };
+                            }
+                            scheduleQueueRefresh();
+                            if (!startedIds.has(id) && !completedIds.has(id)) {
+                                state.results.push({
+                                    id,
+                                    status: "skipped",
+                                    reason:
+                                        value === "deleted"
+                                            ? "deleted by creator"
+                                            : "already exists",
+                                    durationMs: 0
+                                });
+                                completedIds.add(id);
+                                updateStats();
+                                updateProgress(state.results.length, ids.length);
+                                persistJobProgress();
+                            }
+                            return { value };
+                        },
+                        (error) => ({ error })
+                    )
+                    .finally(() => {
+                        activeExistenceChecks--;
+                        fillExistenceCheckQueue();
+                    });
+            }
         };
-        const getExistenceStatus = async (index) => {
-            prefetchExistence(index);
-            const result = await existenceChecks.get(index);
-            if (result.error) throw result.error;
-            return result.value;
-        };
+
+        fillExistenceCheckQueue();
 
         try {
             for (let index = resumeFrom; index < ids.length; index++) {
@@ -1387,7 +1467,14 @@
                 const id = ids[index];
                 const startedAt = performance.now();
 
-                updateProgress(index, ids.length);
+                if (completedIds.has(id)) {
+                    state.currentIndex = index + 1;
+                    persistJobProgress();
+                    continue;
+                }
+                startedIds.add(id);
+
+                updateProgress(state.results.length, ids.length);
                 const eta = formatEta(index - resumeFrom, ids.length - resumeFrom, state.startedAtMs);
                 updateStatus(
                     `[${index + 1}/${ids.length}] Processing ${id}…${eta}`
@@ -1395,14 +1482,7 @@
 
                 try {
                     if (shouldCheckExisting) {
-                        updateStatus(
-                            `[${index + 1}/${ids.length}] Checking ${id}…`
-                        );
-                        const existenceStatus = await getExistenceStatus(index);
-
-                        // Overlap the next lightweight existence lookup with
-                        // this item's retrieval or queue wait.
-                        prefetchExistence(index + 1);
+                        const existenceStatus = existingStatuses.get(id);
 
                         if (existenceStatus === "deleted") {
                             state.results.push({
@@ -1413,12 +1493,13 @@
                                     performance.now() - startedAt
                                 )
                             });
+                            completedIds.add(id);
                             appendLog(
                                 `Skipped ${id}: deleted by creator.`,
                                 "muted"
                             );
                             updateStats();
-                            updateProgress(index + 1, ids.length);
+                            updateProgress(state.results.length, ids.length);
                             state.currentIndex = index + 1;
                             persistJobProgress();
                             continue;
@@ -1433,9 +1514,10 @@
                                     performance.now() - startedAt
                                 )
                             });
+                            completedIds.add(id);
                             appendLog(`Skipped ${id}: already exists.`, "muted");
                             updateStats();
-                            updateProgress(index + 1, ids.length);
+                            updateProgress(state.results.length, ids.length);
                             state.currentIndex = index + 1;
                             persistJobProgress();
                             continue;
@@ -1453,6 +1535,7 @@
                         durationMs: Math.round(performance.now() - startedAt),
                         data
                     });
+                    completedIds.add(id);
                     appendLog(`Retrieved ${id}.`, "success");
                 } catch (error) {
                     if (error.message === "Stopped by user") throw error;
@@ -1466,8 +1549,11 @@
                             ),
                             error: String(error)
                         });
+                        completedIds.add(id);
                         appendLog(`Auth failure on ${id}: ${String(error)}`, "error");
                         state.currentIndex = index + 1;
+                        updateStats();
+                        updateProgress(state.results.length, ids.length);
                         throw error;
                     }
 
@@ -1477,12 +1563,13 @@
                         durationMs: Math.round(performance.now() - startedAt),
                         error: String(error)
                     });
+                    completedIds.add(id);
                     appendLog(`Failed ${id}: ${String(error)}`, "error");
                     console.error(`[Datacat bulk] Failed ${id}`, error);
                 }
 
                 updateStats();
-                updateProgress(index + 1, ids.length);
+                updateProgress(state.results.length, ids.length);
                 state.currentIndex = index + 1;
                 persistJobProgress();
 
@@ -1524,6 +1611,8 @@
             state.stopping = false;
             for (const controller of state.requestControllers) controller.abort();
             state.requestControllers.clear();
+            clearTimeout(queueRefreshTimer);
+            refreshQueueWithoutKnownExisting();
             state.sleepCancel = null;
             state.startedAtMs = null;
             setRunningUi(false);
@@ -1794,6 +1883,10 @@
     });
 
     window.addEventListener("beforeunload", (event) => {
+        if (existingCacheSaveTimer !== null) {
+            clearTimeout(existingCacheSaveTimer);
+            saveExistingIdCache();
+        }
         if (!state.running) return;
         persistJobProgress();
         event.preventDefault();
@@ -1801,17 +1894,8 @@
     });
 
     applySavedSettings();
-    try {
-        const referrerOrigin = new URL(document.referrer).origin;
-        if (JANITOR_ORIGINS.has(referrerOrigin) && window.opener) {
-            window.opener.postMessage(
-                { type: "datacat:janitor-ready" },
-                referrerOrigin
-            );
-        }
-    } catch {
-        /* No JanitorAI opener is available. */
-    }
+    importJanitorIdsFromHash();
+    window.addEventListener("hashchange", importJanitorIdsFromHash);
     enableDragging(panel, elements.header, (rect) => {
         saveSettings({
             left: Math.round(rect.left),

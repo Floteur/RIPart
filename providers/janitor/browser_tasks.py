@@ -19,7 +19,7 @@ from botasaurus.browser import browser
 from botasaurus_driver import cdp
 from botasaurus_driver.cdp.network import CookieParam, CookieSameSite, TimeSinceEpoch
 
-from ...common.cards import build_world_info
+from ...common.cards import build_world_info, save_to_library
 from ...common.text import html_to_text
 from .payloads import (
     ORIGIN,
@@ -1909,12 +1909,14 @@ def recent_task(driver, data):
     # only switches mode once per phase (the order the user asked for):
     #   skip      - already in the library (unless --force)
     #   proxy     - allow_proxy=true → exact proxy trick (phase 1)
-    #   jllm      - allow_proxy=false + --jllm-leak → JanitorLLM leak (phase 2)
-    #   forbidden - allow_proxy=false without --jllm-leak → can't rip
+    #   jllm      - allow_proxy=false + JanitorLLM fallback enabled → lossy
+    #               multi-pass reconstruction (phase 2)
+    #   forbidden - allow_proxy=false + fallback disabled → intentionally skipped
     existing = set(data.get("existing") or [])
     force = bool(data.get("force"))
     jllm_leak = bool(data.get("jllm_leak"))
     jllm_passes = max(1, int(data.get("jllm_passes") or JLLM_LEAK_PASSES))
+    checkpoint_library_dir = str(data.get("checkpoint_library_dir") or "").strip()
 
     def _classify(card: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
         if not force and card["id"] in existing:
@@ -1978,7 +1980,7 @@ def recent_task(driver, data):
             )
             secs = round(time.time() - started, 1)
             _extract_log(f"{card['id']} done in {secs}s", verbose=verbose)
-            return {
+            entry = {
                 "id": card["id"],
                 "name": result.get("characterName") or card["name"],
                 "ok": True,
@@ -1988,6 +1990,26 @@ def recent_task(driver, data):
                 == "reconstructed-jllm",
                 "result": result,
             }
+            # The CLI normally writes the batch only after this browser task
+            # returns. Checkpoint successful cards here so Ctrl-C during a long
+            # listing cannot discard prior captures (and their forum upserts).
+            if checkpoint_library_dir:
+                try:
+                    paths = save_to_library(
+                        Path(checkpoint_library_dir),
+                        result.get("characterId") or card["id"],
+                        result,
+                    )
+                    entry["saved_paths"] = paths
+                    _extract_log(
+                        f"{card['id']} checkpointed to {paths['png']}", verbose=verbose
+                    )
+                except Exception as exc:  # noqa: BLE001 - final save can retry below
+                    entry["checkpoint_error"] = str(exc)
+                    _extract_log(
+                        f"warning: could not checkpoint {card['id']}: {exc}", verbose=verbose
+                    )
+            return entry
         except Exception as exc:  # noqa: BLE001 - one bad card must not abort the batch
             _extract_log(
                 f"warning: extract failed for {card['name']}: {exc}", verbose=verbose
