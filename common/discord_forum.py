@@ -47,7 +47,15 @@ _UUID_RE = re.compile(
 # Forum-title hard cap and per-post applied-tag cap (both Discord limits).
 _TITLE_CAP = 100
 _MAX_APPLIED_TAGS = 5
-_EMBED_DESCRIPTION_CAP = 4000
+# Discord embed limits. Keep these next to the message-level caps so changes to
+# the presentation cannot accidentally produce an Invalid Form Body response.
+_EMBED_TITLE_CAP = 256
+_EMBED_DESCRIPTION_CAP = 4096
+_EMBED_FIELD_CAP = 25
+_EMBED_FIELD_NAME_CAP = 256
+_EMBED_FIELD_VALUE_CAP = 1024
+_EMBED_FOOTER_CAP = 2048
+_EMBED_AUTHOR_CAP = 256
 _EMBEDS_PER_MESSAGE_CAP = 10
 _EMBED_MESSAGE_CHAR_CAP = 6000
 _FILES_PER_MESSAGE_CAP = 10
@@ -171,7 +179,7 @@ def _embed_for(
     image_filename: str,
 ) -> dict[str, Any]:
     """Build the readable forum-card embed posted with the downloadable PNG."""
-    clean_name = (name or "Character").strip()[:256]
+    clean_name = (name or "Character").strip()[:_EMBED_TITLE_CAP]
     platform = _platform_of(url) or "unknown"
     tags = ", ".join(str(tag).strip() for tag in card_tags if str(tag).strip())
     source = (definition_source or "unknown").strip()
@@ -182,21 +190,29 @@ def _embed_for(
             "value": "yes" if (meta or {}).get("is_nsfw") else "no",
             "inline": True,
         },
-        {"name": "Definition", "value": source[:1024], "inline": True},
+        {"name": "Definition", "value": source[:_EMBED_FIELD_VALUE_CAP], "inline": True},
     ]
     if url:
-        fields.append({"name": "Source", "value": url[:1024], "inline": False})
+        fields.append(
+            {"name": "Source", "value": url[:_EMBED_FIELD_VALUE_CAP], "inline": False}
+        )
     if tags:
         fields.append(
             {
                 "name": f"Card tags ({len(card_tags)})",
-                "value": tags[:1024],
+                "value": tags[:_EMBED_FIELD_VALUE_CAP],
                 "inline": False,
             }
         )
     creator = (meta or {}).get("creator_name")
     if creator:
-        fields.append({"name": "Creator", "value": str(creator)[:1024], "inline": True})
+        fields.append(
+            {
+                "name": "Creator",
+                "value": str(creator)[:_EMBED_FIELD_VALUE_CAP],
+                "inline": True,
+            }
+        )
     return {
         "title": clean_name,
         "url": url or None,
@@ -249,7 +265,7 @@ def _detail_embeds_for(result: dict[str, Any]) -> list[dict[str, Any]]:
             chunk_title = title if len(chunks) == 1 else f"{title} ({index}/{len(chunks)})"
             embeds.append(
                 {
-                    "title": chunk_title[:256],
+                    "title": chunk_title[:_EMBED_TITLE_CAP],
                     "description": chunk,
                     "footer": {"text": "ripart archive"},
                 }

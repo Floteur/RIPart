@@ -240,6 +240,9 @@ def extract_chat(
                 max_triggers=max_triggers,
                 log=log,
             )
+            # ``save_to_library`` consumes this canonical field when embedding
+            # recovered lore into the card and persistent observation record.
+            result["entries"] = entries
             result["lorebookEntries"] = entries
             result["diagnostics"]["lorebookEntries"] = len(entries)
             if entries:

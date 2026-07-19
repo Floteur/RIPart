@@ -388,7 +388,9 @@ so RIPart fires them the JanitorAI way: it builds trigger messages from the
 card's own text (description + scenario + greeting — where the keywords live),
 sends each into the chat, and diffs the **system side** of each expanded echo
 against the base prompt to recover the injected entries. Recovered entries are
-appended to the card's creator notes.
+appended to the card's creator notes and embedded as disabled lorebook entries:
+their original trigger conditions cannot be observed reliably, so SillyTavern
+will not treat them as always-active prompts without manual review.
 
 ```bash
 rip clank login --session-token <token> --csrf-token <csrf>   # csrf needed to send
