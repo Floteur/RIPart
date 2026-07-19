@@ -419,4 +419,15 @@ def save_to_library(
     )
 
     _update_library_index(library_dir, character_id, result, entries)
-    return {"png": str(png_path)}
+
+    paths = {"png": str(png_path)}
+    # Auto-publish to the Discord archive forum (UUID-keyed upsert). Best-effort
+    # and env-gated: a no-op unless DISCORD_BOT_TOKEN is configured in .env, and
+    # a Discord failure never propagates out of a rip. This is the single "push"
+    # chokepoint every provider funnels through, so every rip publishes for free.
+    from .discord_forum import publish_card
+
+    published = publish_card(character_id, result, png_path)
+    if published and published.get("thread_id"):
+        paths["discord_thread"] = published["thread_id"]
+    return paths
