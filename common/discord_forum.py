@@ -812,6 +812,11 @@ def publish_lorebooks(lorebook_paths: list[str]) -> list[dict[str, Any]]:
             record = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(record, dict):
                 raise ValueError("lorebook record is not a JSON object")
+            if _is_fully_attributed_observation_record(path, record):
+                # The corresponding provider record already contains these
+                # recovered observations. Publishing this local audit file too
+                # would create a misleading second thread for one lorebook.
+                continue
             source = str(record.get("source") or path.parent.name or "unknown")
             source_id = str(record.get("sourceLorebookId") or "").strip()
             key = f"{source}:{source_id or path.stem}"
@@ -829,6 +834,26 @@ def publish_lorebooks(lorebook_paths: list[str]) -> list[dict[str, Any]]:
         except Exception as exc:  # noqa: BLE001 - continue through changed records
             outcomes.append({"action": "error", "path": str(path), "error": str(exc)})
     return outcomes
+
+
+def _is_fully_attributed_observation_record(path: Path, record: dict[str, Any]) -> bool:
+    """Whether an unassigned audit file is wholly represented by a book record."""
+    if path.parent.name != "unassigned":
+        return False
+    observations = record.get("observations")
+    if not isinstance(observations, list) or not observations:
+        return False
+    for observation in observations:
+        attribution = observation.get("attribution") if isinstance(observation, dict) else None
+        candidates = attribution.get("candidates") if isinstance(attribution, dict) else None
+        if not (
+            isinstance(attribution, dict)
+            and attribution.get("status") == "inferred"
+            and isinstance(candidates, list)
+            and len(candidates) == 1
+        ):
+            return False
+    return True
 
 
 def _safe_filename(value: str) -> str:

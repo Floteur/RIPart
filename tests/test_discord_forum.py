@@ -106,6 +106,42 @@ def test_publish_lorebooks_uses_the_dedicated_publisher(monkeypatch, tmp_path):
     assert captured["filename"] == "janitor-book-42.json"
 
 
+def test_publish_lorebooks_does_not_duplicate_fully_attributed_observations(
+    monkeypatch, tmp_path
+):
+    record_path = tmp_path / "lorebooks" / "janitor" / "unassigned" / "character.json"
+    record_path.parent.mkdir(parents=True)
+    record_path.write_text(
+        discord_forum.json.dumps(
+            {
+                "source": "janitor",
+                "observations": [
+                    {
+                        "attribution": {
+                            "status": "inferred",
+                            "candidates": ["book-42"],
+                        }
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class LorebookPublisher:
+        def lorebook_thread_index(self):
+            return {}
+
+        def upsert_lorebook(self, **_kwargs):
+            raise AssertionError("fully attributed audit file must not be published")
+
+    monkeypatch.setattr(
+        discord_forum, "_lorebook_publisher_from_env", lambda: LorebookPublisher()
+    )
+
+    assert discord_forum.publish_lorebooks([str(record_path)]) == []
+
+
 def test_upsert_creates_a_thread_with_the_rich_embed(tmp_path):
     """The thread-creation payload uses the embed, not the former text body."""
     png_path = tmp_path / "card.png"
