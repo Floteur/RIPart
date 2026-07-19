@@ -128,7 +128,7 @@ def fetch_lorebook(lorebook_id: str) -> dict[str, Any] | None:
     world = _lorebook_world_info(chapters)
     if not world:
         return None
-    return {"title": name, "worldInfo": {"entries": world}}
+    return {"id": str(lorebook_id), "title": name, "worldInfo": {"entries": world}}
 
 
 def fetch_companion_lorebooks(companion_id: str) -> list[dict[str, Any]]:

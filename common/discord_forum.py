@@ -30,7 +30,7 @@ from typing import Any
 
 import httpx
 
-from .text import normalize_user_placeholder
+from .cards import build_character_book
 
 # Project root (parent of this ``common/`` package) — where ``.env`` lives.
 _ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +50,7 @@ _MAX_APPLIED_TAGS = 5
 _EMBED_DESCRIPTION_CAP = 4000
 _EMBEDS_PER_MESSAGE_CAP = 10
 _EMBED_MESSAGE_CHAR_CAP = 6000
+_FILES_PER_MESSAGE_CAP = 10
 
 # URL substring → platform tag name (matches the forum's platform tags).
 _PLATFORMS: tuple[tuple[str, str], ...] = (
@@ -226,7 +227,7 @@ def _split_embed_text(text: str) -> list[str]:
 
 
 def _detail_embeds_for(result: dict[str, Any]) -> list[dict[str, Any]]:
-    """Render all recovered card text as follow-up embeds for a forum thread."""
+    """Render recovered card fields (but not lorebooks) as follow-up embeds."""
     character = result.get("character") or {}
     sections: list[tuple[str, str]] = []
     for label, key in (
@@ -241,34 +242,6 @@ def _detail_embeds_for(result: dict[str, Any]) -> list[dict[str, Any]]:
         if value:
             sections.append((label, value))
 
-    for index, entry in enumerate(result.get("entries") or [], start=1):
-        if isinstance(entry, dict):
-            content = str(entry.get("content") or entry.get("text") or "").strip()
-            title = str(entry.get("comment") or entry.get("title") or "").strip()
-        else:
-            content, title = str(entry or "").strip(), ""
-        if content:
-            suffix = f" — {title}" if title else ""
-            sections.append((f"Extracted lorebook entry {index}{suffix}", content))
-
-    for book_index, book in enumerate(result.get("publicLorebooks") or [], start=1):
-        title = str(book.get("title") or book.get("name") or f"Book {book_index}").strip()
-        entries = (book.get("worldInfo") or {}).get("entries") or {}
-        values = entries.values() if isinstance(entries, dict) else entries
-        for entry_index, entry in enumerate(values, start=1):
-            if not isinstance(entry, dict):
-                continue
-            content = normalize_user_placeholder(
-                str(entry.get("content") or "").strip()
-            )
-            if not content:
-                continue
-            comment = str(entry.get("comment") or entry.get("name") or "").strip()
-            suffix = f" — {comment}" if comment else ""
-            sections.append(
-                (f"Public lorebook: {title} #{entry_index}{suffix}", content)
-            )
-
     embeds: list[dict[str, Any]] = []
     for title, content in sections:
         chunks = _split_embed_text(content)
@@ -282,6 +255,61 @@ def _detail_embeds_for(result: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return embeds
+
+
+def _lorebook_files_for(
+    character_id: str, result: dict[str, Any]
+) -> list[tuple[str, bytes]]:
+    """Return importable SillyTavern character-book JSON attachments.
+
+    Recovered private lore has no original trigger keys, so it is exported as one
+    always-active book. Public books retain their real keys and each gets its own
+    file. This keeps large lorebooks readable and avoids flooding a forum thread
+    with one embed per entry.
+    """
+    files: list[tuple[str, bytes]] = []
+
+    def _encode(filename: str, book: dict[str, Any] | None) -> None:
+        if not book or not book.get("entries"):
+            return
+        files.append(
+            (
+                filename,
+                json.dumps(book, ensure_ascii=False, indent=2).encode("utf-8"),
+            )
+        )
+
+    recovered_entries: list[str] = []
+    for entry in result.get("entries") or []:
+        if isinstance(entry, dict):
+            entry = entry.get("content") or entry.get("text") or ""
+        text = str(entry or "").strip()
+        if text:
+            recovered_entries.append(text)
+    recovered = build_character_book(recovered_entries)
+    _encode(f"{character_id}-recovered-lorebook.json", recovered)
+
+    for index, public_book in enumerate(result.get("publicLorebooks") or [], start=1):
+        if not isinstance(public_book, dict):
+            continue
+        book = build_character_book(None, [public_book])
+        if book:
+            book["name"] = str(
+                public_book.get("title") or public_book.get("name") or f"Public book {index}"
+            )
+        _encode(f"{character_id}-public-lorebook-{index}.json", book)
+
+    return files
+
+
+def _lorebook_file_batches(
+    files: list[tuple[str, bytes]],
+) -> list[list[tuple[str, bytes]]]:
+    """Split attachments to Discord's ten-files-per-message limit."""
+    return [
+        files[index : index + _FILES_PER_MESSAGE_CAP]
+        for index in range(0, len(files), _FILES_PER_MESSAGE_CAP)
+    ]
 
 
 def _embed_char_count(embed: dict[str, Any]) -> int:
@@ -436,6 +464,13 @@ class ForumPublisher:
     def _png_file(self, png_path: Path) -> dict[str, Any]:
         return {"files[0]": (png_path.name, png_path.read_bytes(), "image/png")}
 
+    @staticmethod
+    def _json_files(files: list[tuple[str, bytes]]) -> dict[str, Any]:
+        return {
+            f"files[{index}]": (filename, content, "application/json")
+            for index, (filename, content) in enumerate(files)
+        }
+
     def create_post(
         self,
         *,
@@ -488,6 +523,30 @@ class ForumPublisher:
             return resp.json()
         raise RuntimeError(f"detail reply HTTP {resp.status_code}: {resp.text[:200]}")
 
+    def reply_lorebook_files(
+        self, thread_id: str, *, files: list[tuple[str, bytes]]
+    ) -> dict[str, Any]:
+        """Attach the card's lorebook exports as JSON files in one reply."""
+        if not files:
+            return {}
+        resp = self._request(
+            "POST",
+            f"/channels/{thread_id}/messages",
+            data={
+                "payload_json": json.dumps(
+                    {
+                        "content": "Lorebook JSON export(s), ready to import into SillyTavern.",
+                    }
+                )
+            },
+            files=self._json_files(files),
+        )
+        if resp.status_code in (200, 201):
+            return resp.json()
+        raise RuntimeError(
+            f"lorebook attachment reply HTTP {resp.status_code}: {resp.text[:200]}"
+        )
+
     # -- the upsert ------------------------------------------------------- #
 
     def upsert(
@@ -500,6 +559,7 @@ class ForumPublisher:
         meta: dict[str, Any],
         definition_source: str = "",
         detail_embeds: list[dict[str, Any]] | None = None,
+        lorebook_files: list[tuple[str, bytes]] | None = None,
         png_path: Path,
         thread_index: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -524,6 +584,8 @@ class ForumPublisher:
             if self.on_duplicate == "skip":
                 return {"action": "skip", "thread_id": existing, "uuid": uuid}
             self.reply(existing, embed=embed, png_path=png_path)
+            for batch in _lorebook_file_batches(lorebook_files or []):
+                self.reply_lorebook_files(existing, files=batch)
             for batch in _detail_embed_batches(detail_embeds or []):
                 self.reply_embeds(existing, embeds=batch)
             return {"action": "repost", "thread_id": existing, "uuid": uuid}
@@ -538,6 +600,8 @@ class ForumPublisher:
         )
         thread_id = (created or {}).get("id")
         if thread_id:
+            for batch in _lorebook_file_batches(lorebook_files or []):
+                self.reply_lorebook_files(thread_id, files=batch)
             for batch in _detail_embed_batches(detail_embeds or []):
                 self.reply_embeds(thread_id, embeds=batch)
         if thread_index is not None and thread_id:
@@ -586,6 +650,7 @@ def publish_card(
             meta=result.get("meta") or {},
             definition_source=character.get("definitionSource") or "",
             detail_embeds=_detail_embeds_for(result),
+            lorebook_files=_lorebook_files_for(character_id, result),
             png_path=Path(png_path),
         )
     except Exception as exc:  # noqa: BLE001 - publishing is best-effort

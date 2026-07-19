@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .lorebooks import update_lorebook_library
 from .text import norm, normalize_user_placeholder, write_json
 
 # Longest-side cap (px) for stored card portraits - keeps library PNGs small.
@@ -383,7 +384,7 @@ def _update_library_index(
 
 def save_to_library(
     library_dir: Path, character_id: str, result: dict[str, Any]
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Store one extracted character as a single self-contained card PNG.
 
     Layout: ``<library_dir>/<uuid>.png`` (V3 card + embedded lorebook) plus a
@@ -419,8 +420,11 @@ def save_to_library(
     )
 
     _update_library_index(library_dir, character_id, result, entries)
+    lorebook_paths = update_lorebook_library(library_dir, character_id, result)
 
     paths = {"png": str(png_path)}
+    if lorebook_paths:
+        paths["lorebooks"] = lorebook_paths
     # Auto-publish to the Discord archive forum (UUID-keyed upsert). Best-effort
     # and env-gated: a no-op unless DISCORD_BOT_TOKEN is configured in .env, and
     # a Discord failure never propagates out of a rip. This is the single "push"

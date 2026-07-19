@@ -518,6 +518,11 @@ rip completion fish   # ~/.config/fish/config.fish
 
 ```
 output/cli/
+├── library/
+│   ├── <character-uuid>.png    # self-contained Tavern character card
+│   ├── index.json              # character catalogue
+│   └── lorebooks/
+│       └── <source>/<book-id>.json # reusable World Info + linked character UUIDs
 ├── inspections/
 │   └── <character>.json        # `rip inspect`
 └── extracts/

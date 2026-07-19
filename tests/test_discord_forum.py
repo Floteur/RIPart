@@ -9,6 +9,8 @@ from ripart.common.discord_forum import (
     _detail_embeds_for,
     _embed_char_count,
     _embed_for,
+    _lorebook_file_batches,
+    _lorebook_files_for,
 )
 
 
@@ -100,7 +102,7 @@ def test_upsert_creates_a_thread_with_the_rich_embed(tmp_path):
     assert captured["embed"]["title"] == "Card"
 
 
-def test_detail_embeds_include_definition_and_lorebook_content():
+def test_detail_embeds_include_card_text_but_not_lorebook_content():
     embeds = _detail_embeds_for(
         {
             "character": {"description": "A full definition.", "scenario": "A scenario."},
@@ -117,9 +119,42 @@ def test_detail_embeds_include_definition_and_lorebook_content():
     assert [(embed["title"], embed["description"]) for embed in embeds] == [
         ("Definition", "A full definition."),
         ("Scenario", "A scenario."),
-        ("Extracted lorebook entry 1", "Recovered private lore."),
-        ("Public lorebook: Public book #1", "Public lore."),
     ]
+
+
+def test_lorebook_files_are_importable_character_books():
+    files = _lorebook_files_for(
+        "c49da2b4-2b9c-479a-a99e-2b979cc22f82",
+        {
+            "entries": ["Recovered private lore."],
+            "publicLorebooks": [
+                {
+                    "title": "Public book",
+                    "worldInfo": {
+                        "entries": {
+                            "0": {
+                                "content": "Public lore for {user}.",
+                                "key": ["public-key"],
+                                "comment": "Public entry",
+                            }
+                        }
+                    },
+                }
+            ],
+        },
+    )
+
+    assert [filename for filename, _content in files] == [
+        "c49da2b4-2b9c-479a-a99e-2b979cc22f82-recovered-lorebook.json",
+        "c49da2b4-2b9c-479a-a99e-2b979cc22f82-public-lorebook-1.json",
+    ]
+    recovered = discord_forum.json.loads(files[0][1])
+    public = discord_forum.json.loads(files[1][1])
+    assert recovered["entries"][0]["content"] == "Recovered private lore."
+    assert recovered["entries"][0]["constant"] is True
+    assert public["name"] == "Public book"
+    assert public["entries"][0]["keys"] == ["public-key"]
+    assert public["entries"][0]["content"] == "Public lore for {{user}}."
 
 
 def test_detail_embed_batches_obey_discord_message_limits():
@@ -133,3 +168,11 @@ def test_detail_embed_batches_obey_discord_message_limits():
     assert len(batches) == 3
     assert all(len(batch) <= 10 for batch in batches)
     assert all(sum(_embed_char_count(embed) for embed in batch) <= 6000 for batch in batches)
+
+
+def test_lorebook_file_batches_obey_discord_attachment_limit():
+    files = [(f"book-{index}.json", b"{}") for index in range(11)]
+
+    batches = _lorebook_file_batches(files)
+
+    assert [len(batch) for batch in batches] == [10, 1]
