@@ -31,7 +31,7 @@ from .client import (
     fetch_avatar,
     parse_character_id,
 )
-from .leak import DEFAULT_LEAK_PROMPT, leak_definition
+from .leak import DEFAULT_LEAK_MODEL, DEFAULT_LEAK_PROMPT, leak_definition
 from .read import get_character
 
 
@@ -71,7 +71,7 @@ def extract_character(
     *,
     leak: bool = False,
     leak_prompt: str = DEFAULT_LEAK_PROMPT,
-    leak_model: str = "default",
+    leak_model: str = DEFAULT_LEAK_MODEL,
     leak_attempts: int = 4,
     leak_keep: bool = False,
     leak_timeout: int = 120,

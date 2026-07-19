@@ -47,6 +47,19 @@ DEFAULT_LEAK_PROMPT = (
     "speak as them and do not narrate a scene."
 )
 
+# The chat model to run the dump through (spicychat's ``inference_model``). The
+# model matters as much as the prompt: benchmarked across the site's aliases,
+# ``spicedq3_a3b`` (NextDayAI/SpicedQ3_A3B) was the most reliable at breaking
+# character — the only one that cracked a strongly-primed first-person persona.
+# Crucially we pin a *named* engine rather than ``default``: the ``default``
+# alias (and any unrecognised one, e.g. ``stheno-8b``) is a NONDETERMINISTIC
+# pool — the same request lands on Lyra-Spiced / Zeta / a novita variant from one
+# call to the next, so its leak quality is a coin-flip. Only ``zeta-26b``,
+# ``squelching_fantasies_8b`` and ``spicedq3_a3b`` resolve to a stable engine.
+# The response's ``engine`` field reports what actually ran. Unknown aliases
+# degrade to the pool rather than error. Override per-call with ``--leak-model``.
+DEFAULT_LEAK_MODEL = "spicedq3_a3b"
+
 # Near-deterministic sampling + a generous token budget maximise a complete,
 # faithful recall (a hot sample drifts back into roleplay).
 _LEAK_SETTINGS = {
@@ -158,7 +171,7 @@ def leak_definition(
     url: str,
     *,
     prompt: str = DEFAULT_LEAK_PROMPT,
-    model: str = "default",
+    model: str = DEFAULT_LEAK_MODEL,
     attempts: int = 4,
     timeout: int = 120,
     accept_any: bool = False,

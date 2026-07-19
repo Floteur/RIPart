@@ -228,7 +228,7 @@ def extract(
                 url,
                 leak=leak,
                 leak_prompt=leak_prompt or spicychat.DEFAULT_LEAK_PROMPT,
-                leak_model=leak_model or "default",
+                leak_model=leak_model or spicychat.DEFAULT_LEAK_MODEL,
                 leak_keep=leak_keep,
                 leak_timeout=leak_timeout,
                 log=log or (lambda _message: None),

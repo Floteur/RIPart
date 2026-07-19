@@ -1668,9 +1668,12 @@ def _spicychat_list(
 @click.option(
     "--leak-model",
     metavar="MODEL",
-    default="default",
+    default=sc.DEFAULT_LEAK_MODEL,
     show_default=True,
-    help="[--leak] spicychat inference_model to run the dump through.",
+    help="[--leak] spicychat inference_model to run the dump through. The default "
+    "breaks character most reliably; 'default' is a nondeterministic engine pool "
+    "(Lyra/Zeta/novita vary per call), so leak quality with it is a coin-flip. "
+    "Honored named aliases: zeta-26b, squelching_fantasies_8b, spicedq3_a3b.",
 )
 @click.option(
     "--leak-attempts",
@@ -1728,7 +1731,7 @@ def _spicychat_extract(
     url: str,
     *,
     leak: bool = False,
-    leak_model: str = "default",
+    leak_model: str = sc.DEFAULT_LEAK_MODEL,
     leak_attempts: int = 4,
     leak_prompt: str | None = None,
     leak_keep: bool = False,
