@@ -263,9 +263,9 @@ def _lorebook_files_for(
     """Return importable SillyTavern character-book JSON attachments.
 
     Recovered private lore has no original trigger keys, so it is exported as one
-    always-active book. Public books retain their real keys and each gets its own
-    file. This keeps large lorebooks readable and avoids flooding a forum thread
-    with one embed per entry.
+    disabled review book. Public books retain their real keys and each gets its
+    own file. This keeps large lorebooks readable and avoids flooding a forum
+    thread with one embed per entry.
     """
     files: list[tuple[str, bytes]] = []
 

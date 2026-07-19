@@ -151,7 +151,11 @@ def test_lorebook_files_are_importable_character_books():
     recovered = discord_forum.json.loads(files[0][1])
     public = discord_forum.json.loads(files[1][1])
     assert recovered["entries"][0]["content"] == "Recovered private lore."
-    assert recovered["entries"][0]["constant"] is True
+    assert recovered["entries"][0]["constant"] is False
+    assert recovered["entries"][0]["enabled"] is False
+    assert recovered["entries"][0]["extensions"]["ripart"]["recovery"][
+        "trigger_status"
+    ] == "unknown"
     assert public["name"] == "Public book"
     assert public["entries"][0]["keys"] == ["public-key"]
     assert public["entries"][0]["content"] == "Public lore for {{user}}."

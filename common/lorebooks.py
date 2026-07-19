@@ -40,28 +40,38 @@ def _entries(book: dict[str, Any]) -> dict[str, dict[str, Any]]:
         # all affect whether and where an entry is injected.
         stored = json.loads(json.dumps(entry, ensure_ascii=False))
         stored["content"] = content
-        entries[str(stored.get("uid", uid))] = stored
+        identity = str(stored.get("uid", uid))
+        if identity in entries:
+            suffix = 2
+            while f"{identity}-{suffix}" in entries:
+                suffix += 1
+            identity = f"{identity}-{suffix}"
+        entries[identity] = stored
     return entries
 
 
-def _fingerprint(title: str, entries: dict[str, dict[str, Any]]) -> str:
+def _fingerprint(book: dict[str, Any], entries: dict[str, dict[str, Any]]) -> str:
     # Used only when the source did not expose a lorebook ID (e.g. an imported
     # Tavern card).  It is content-addressed and therefore deliberately does not
     # claim an external provider identity.
-    material = "\n".join(
-        [norm(title)]
-        + sorted(
-            "|".join(
-                (
-                    norm(str(entry.get("content") or "")),
-                    ",".join(sorted(norm(str(key)) for key in entry.get("key") or [])),
-                    ",".join(
-                        sorted(norm(str(key)) for key in entry.get("keysecondary") or [])
-                    ),
-                )
-            )
-            for entry in entries.values()
-        )
+    # Identity must include every value that can change activation or injection.
+    # Exclude provider bookkeeping, but retain exact entry objects and lorebook
+    # settings so behaviorally different books never overwrite each other.
+    material = json.dumps(
+        {
+            "title": norm(str(book.get("title") or book.get("name") or "")),
+            "description": book.get("description"),
+            "scan_depth": book.get("scan_depth", book.get("scanDepth")),
+            "token_budget": book.get("token_budget", book.get("tokenBudget")),
+            "recursive_scanning": book.get(
+                "recursive_scanning", book.get("recursiveScanning")
+            ),
+            "extensions": book.get("extensions"),
+            "entries": entries,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
@@ -111,7 +121,7 @@ def _write_unassigned_observations(
         / "unassigned"
         / f"{_safe_component(character_id)}.json"
     )
-    observations = [
+    new_observations = [
         {
             "content": content,
             "contentFingerprint": hashlib.sha256(norm(content).encode("utf-8")).hexdigest(),
@@ -119,13 +129,32 @@ def _write_unassigned_observations(
         }
         for content in entries
     ]
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    prior = existing.get("observations") if isinstance(existing, dict) else []
+    prior = prior if isinstance(prior, list) else []
+    observations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for observation in [*prior, *new_observations]:
+        if not isinstance(observation, dict):
+            continue
+        fingerprint = str(observation.get("contentFingerprint") or "")
+        if not fingerprint or fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        observations.append(observation)
     write_json(
         path,
         {
             "schemaVersion": 1,
             "source": source,
             "characterId": character_id,
-            "capturedAt": now,
+            "firstSeenAt": existing.get("firstSeenAt", existing.get("capturedAt", now))
+            if isinstance(existing, dict)
+            else now,
+            "updatedAt": now,
             "observations": observations,
         },
     )
@@ -154,7 +183,7 @@ def update_lorebook_library(
             continue
         title = str(book.get("title") or "").strip()
         source_id = str(book.get("id") or "").strip() or None
-        fingerprint = _fingerprint(title, entries)
+        fingerprint = _fingerprint(book, entries)
         identity = source_id or f"content-{fingerprint}"
         path = _record_path(library_dir, source, identity)
         try:

@@ -70,3 +70,55 @@ def test_private_entries_are_kept_as_unassigned_observations(tmp_path):
             "attribution": {"status": "unassigned", "candidates": []},
         }
     ]
+
+
+def test_private_observations_accumulate_across_extractions(tmp_path):
+    result = _result({"title": "empty", "worldInfo": {"entries": {}}})
+    result["entries"] = ["First recovered detail."]
+    update_lorebook_library(tmp_path, "char-private", result)
+    result["entries"] = ["Second recovered detail."]
+    update_lorebook_library(tmp_path, "char-private", result)
+
+    observation = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "unassigned" / "char-private.json").read_text()
+    )
+    assert [item["content"] for item in observation["observations"]] == [
+        "First recovered detail.",
+        "Second recovered detail.",
+    ]
+
+
+def test_fingerprint_distinguishes_behaviorally_different_books(tmp_path):
+    first = {
+        "title": "Imported book",
+        "worldInfo": {
+            "entries": {"0": {"content": "A fact.", "key": ["fact"], "probability": 25}}
+        },
+    }
+    second = {
+        "title": "Imported book",
+        "worldInfo": {
+            "entries": {"0": {"content": "A fact.", "key": ["fact"], "probability": 75}}
+        },
+    }
+
+    first_path = update_lorebook_library(tmp_path, "char-a", _result(first))[0]
+    second_path = update_lorebook_library(tmp_path, "char-b", _result(second))[0]
+
+    assert first_path != second_path
+
+
+def test_duplicate_source_uids_do_not_overwrite_entries(tmp_path):
+    book = {
+        "id": "duplicates",
+        "worldInfo": {
+            "entries": [
+                {"uid": 7, "content": "First."},
+                {"uid": 7, "content": "Second."},
+            ]
+        },
+    }
+    path = update_lorebook_library(tmp_path, "char-a", _result(book))[0]
+    record = json.loads(open(path, encoding="utf-8").read())
+
+    assert list(record["worldInfo"]["entries"]) == ["7", "7-2"]
