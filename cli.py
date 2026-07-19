@@ -182,6 +182,17 @@ def verbose_option(func):
     )(func)
 
 
+def discord_verbose_option(func):
+    """Add safe bot verbosity without exposing Discord API payloads."""
+    return click.option(
+        "-v",
+        "--verbose",
+        count=True,
+        help="Repeatable: show Discord gateway lifecycle and command-queue diagnostics. "
+        "Discord API payloads are never logged.",
+    )(func)
+
+
 def browser_kwargs(headed: bool) -> dict[str, bool]:
     return {"headless": not headed, "enable_xvfb_virtual_display": False}
 
@@ -2173,6 +2184,15 @@ def completion(shell: str | None) -> None:
     for name in shells:
         console.print(f"[bold cyan]{name}[/]")
         console.print(f"  {_COMPLETION_SNIPPETS[name]}\n")
+
+
+@main.command("discord-bot")
+@discord_verbose_option
+def discord_bot(verbose: int) -> None:
+    """Serve the one-at-a-time `/rip` Discord command gateway."""
+    from .common.discord_bot import run_discord_bot
+
+    run_discord_bot(verbose=verbose)
 
 
 if __name__ == "__main__":

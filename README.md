@@ -115,6 +115,39 @@ Run `rip COMMAND --help` for the full, colour-coded help of any command.
 | `rip clank …` | Rip characters from [clank.world](https://clank.world) via its API (no browser). See below. |
 | `rip spicychat …` | Rip characters from [spicychat.ai](https://spicychat.ai) via its API (no browser, no login). See below. |
 | `rip completion [SHELL]` | Print instructions to enable tab-completion. |
+| `rip discord-bot` | Serve the `/rip` Discord command gateway, executing one CLI command at a time. |
+
+### Discord command bot
+
+The existing `DISCORD_BOT_TOKEN` can also run a private slash-command gateway.
+Install the optional dependency, then run it from the project root:
+
+```bash
+uv sync --extra discord
+uv run rip discord-bot
+```
+
+Add `-v` for Discord gateway lifecycle and command-queue logs:
+`uv run --extra discord rip discord-bot -v`. Repeating it is safe for the
+Discord bot: raw Discord API payloads are never logged.
+
+The bot registers discoverable commands such as `/rip janitor extract`,
+`/rip saucepan list`, and `/rip clank status` in `DISCORD_GUILD_ID`. Select the
+provider and action from Discord's command picker. Discord displays each
+action's typed inputs and CLI flags; `extract` actions require a `uuid` field
+(paste the UUID shown by a list/search result). Commands with no inputs show no
+placeholder fields. Only configured `DISCORD_ADMIN_IDS` may run `logout`.
+It runs `python -m ripart` directly (never through a shell), queues requests FIFO,
+and has exactly one worker, so browser profiles and saved provider sessions are
+never used in parallel. The channel shows queued/running/completed status,
+including PID, elapsed time, and CLI activity; the live output and long-output
+attachment stay private to the person who ran the command.
+
+Any member of the configured guild can use the commands (or only members in
+`DISCORD_COMMAND_CHANNEL_ID` when that optional channel restriction is set).
+Set `DISCORD_CLI_TIMEOUT_SECONDS` to change the per-command limit (default:
+900). All provider `logout` actions are restricted to the comma-separated
+Discord user IDs in `DISCORD_ADMIN_IDS`.
 
 ### Open archives (chub.ai, character-tavern, any card file)
 

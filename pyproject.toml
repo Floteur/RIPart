@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 # Dev/test extras: `uv sync --extra dev` (or `pip install -e .[dev]`).
 dev = ["pytest>=8"]
+discord = ["discord.py>=2.4,<3"]
 
 [project.scripts]
 rip = "ripart.cli:main"
