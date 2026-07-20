@@ -171,6 +171,11 @@ def _write_unassigned_observations(
     entries = _private_entries(result)
     if not entries or not character_id:
         return None
+    if not attached_lorebook_ids:
+        # No attached lorebook means no book to attribute these blocks to: the
+        # recovered text (Janitor persona/guideline residue) can never be
+        # promoted, so recording it as lorebook evidence is meaningless.
+        return None
     path = (
         library_dir
         / "lorebooks"

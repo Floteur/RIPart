@@ -53,12 +53,21 @@ def test_lorebook_record_uses_content_fingerprint_when_no_provider_id(tmp_path):
     assert record["contentFingerprint"] in paths[0]
 
 
-def test_private_entries_are_kept_as_unassigned_observations(tmp_path):
+def test_private_entries_need_an_attached_lorebook_to_be_recorded(tmp_path):
+    # No attached lorebook: recovered blocks can never be attributed to a book,
+    # so no observation record is written (nothing to grab a lorebook for).
     result = _result({"title": "empty", "worldInfo": {"entries": {}}})
+    result["entries"] = ["Private setting detail."]
+    update_lorebook_library(tmp_path, "char-nobook", result)
+    assert not (
+        tmp_path / "lorebooks" / "janitor" / "unassigned" / "char-nobook.json"
+    ).exists()
+
+    # With an attached (private) lorebook id, the same blocks are kept for later
+    # cross-character attribution.
+    result = _result({"id": "book-9", "title": "Private", "worldInfo": {"entries": {}}})
     result["entries"] = ["Private setting detail.", "Private setting detail."]
-
     update_lorebook_library(tmp_path, "char-private", result)
-
     observation = json.loads(
         (tmp_path / "lorebooks" / "janitor" / "unassigned" / "char-private.json").read_text()
     )
@@ -67,13 +76,13 @@ def test_private_entries_are_kept_as_unassigned_observations(tmp_path):
         {
             "content": "Private setting detail.",
             "contentFingerprint": observation["observations"][0]["contentFingerprint"],
-            "attribution": {"status": "unassigned", "candidates": []},
+            "attribution": {"status": "inferred", "candidates": ["book-9"]},
         }
     ]
 
 
 def test_private_observations_accumulate_across_extractions(tmp_path):
-    result = _result({"title": "empty", "worldInfo": {"entries": {}}})
+    result = _result({"id": "book-1", "title": "Private", "worldInfo": {"entries": {}}})
     result["entries"] = ["First recovered detail."]
     update_lorebook_library(tmp_path, "char-private", result)
     result["entries"] = ["Second recovered detail."]
