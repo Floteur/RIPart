@@ -287,6 +287,49 @@ def build_trigger_search_messages(entries: list[str]) -> list[tuple[str, str]]:
     return out
 
 
+def _is_header(block: str) -> bool:
+    """A short heading line that introduces the block after it, not its own entry.
+
+    e.g. ``> Picture Description`` or ``PASTE ONE OF THE LINKS BELOW`` — splitting
+    the recovered lorebook on blank lines strands these; they belong to the block
+    that follows.
+    """
+    if "\n" in block:  # a multi-line paragraph is real content, never a heading
+        return False
+    line = block.strip()
+    if not line:
+        return False
+    return (
+        line[0] in "># "
+        or line.endswith(":")
+        or (len(line) < 50 and line[-1] not in ".!?")
+    )
+
+
+def _split_entries(text: str) -> list[str]:
+    """Split recovered lorebook text into entries on blank lines, keeping a short
+    heading attached to the block it introduces instead of stranding it alone.
+
+    ponytail: heuristic boundary (blank line + heading-glue). The true per-entry
+    boundaries of a code-private lorebook aren't in the echo; upgrade only if a
+    provider ever exposes them.
+    """
+    blocks: list[str] = []
+    pending: list[str] = []
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip()
+        if not para:
+            continue
+        if _is_header(para):
+            pending.append(para)
+            continue
+        blocks.append("\n\n".join([*pending, para]))
+        pending = []
+    if pending:  # trailing heading(s) with no body of their own
+        blocks.append("\n\n".join(pending))
+    return blocks
+
+
 def merge_separated_results(separations: list[dict[str, Any]]) -> dict[str, Any]:
     blocks: list[str] = []
     seen: set[str] = set()
@@ -302,7 +345,7 @@ def merge_separated_results(separations: list[dict[str, Any]]) -> dict[str, Any]
             blocks.append(text)
         lorebook_text = str(separated.get("lorebookText") or "").strip()
         if lorebook_text and not separated.get("entries"):
-            for block in re.split(r"\n\s*\n", lorebook_text):
+            for block in _split_entries(lorebook_text):
                 text = block.strip()
                 if len(text) < 8:
                     continue
@@ -368,11 +411,7 @@ def separate(
     return {
         "systemContent": system_content,
         "lorebookText": lorebook_text,
-        "entries": [
-            block.strip()
-            for block in re.split(r"\n\s*\n", lorebook_text)
-            if block.strip()
-        ],
+        "entries": _split_entries(lorebook_text),
     }
 
 

@@ -8,6 +8,25 @@ from ripart.providers.janitor.payloads import (
     build_trigger_search_messages,
     separate,
 )
+from ripart.providers.janitor.payloads import _split_entries
+
+
+def test_split_entries_keeps_headings_with_their_block():
+    text = (
+        "PASTE ONE OF THE LINKS BELOW\n\n"
+        "* ![11](https://x/a.webp)\n* ![12](https://x/b.webp)\n\n"
+        "> Picture Description\n\n"
+        "11= park bench, yellow cardigan, sexy."
+    )
+
+    entries = _split_entries(text)
+
+    # No heading stranded as its own bogus entry ...
+    assert "> Picture Description" not in entries
+    assert "PASTE ONE OF THE LINKS BELOW" not in entries
+    # ... each heading rides with the block it introduces.
+    assert any("PASTE ONE OF THE LINKS BELOW" in e and "a.webp" in e for e in entries)
+    assert any("> Picture Description" in e and "11= park" in e for e in entries)
 
 
 def test_normalize_user_placeholder_collapses_any_brace_count():

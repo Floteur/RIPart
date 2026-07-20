@@ -18,8 +18,8 @@ from typing import Any
 from .lorebooks import update_lorebook_library
 from .text import norm, normalize_user_placeholder, write_json
 
-# Longest-side cap (px) for stored card portraits - keeps library PNGs small.
-CARD_MAX_DIM = 512
+# Discord accepts up to 10 MB per attachment; keep full-res portraits under it.
+CARD_MAX_BYTES = 10 * 1024 * 1024
 
 
 def build_world_info(raw_entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -552,11 +552,6 @@ def encode_card_png(
     if image is None:
         image = Image.new("RGB", (400, 600), (32, 34, 37))
 
-    # Downscale oversized portraits so library cards stay small (avatars are
-    # fetched at width=1200); never upscale.
-    if max(image.size) > CARD_MAX_DIM:
-        image.thumbnail((CARD_MAX_DIM, CARD_MAX_DIM), Image.LANCZOS)
-
     info = PngInfo()
     for keyword, card in cards.items():
         payload = base64.b64encode(
@@ -564,9 +559,16 @@ def encode_card_png(
         ).decode("ascii")
         info.add_text(keyword, payload)
 
-    buffer = BytesIO()
-    image.save(buffer, format="PNG", pnginfo=info, optimize=True)
-    return buffer.getvalue()
+    # Keep full resolution, but shrink the longest side until the encoded PNG
+    # fits Discord's 10 MB limit (metadata chunks ride along either way).
+    while True:
+        buffer = BytesIO()
+        image.save(buffer, format="PNG", pnginfo=info, optimize=True)
+        data = buffer.getvalue()
+        if len(data) <= CARD_MAX_BYTES or max(image.size) <= 512:
+            return data
+        shrunk = int(max(image.size) * 0.85)
+        image.thumbnail((shrunk, shrunk), Image.LANCZOS)
 
 
 def _update_library_index(
