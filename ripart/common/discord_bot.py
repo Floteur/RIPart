@@ -34,6 +34,79 @@ _INLINE_OUTPUT_LIMIT = 1_500  # longer results are sent as a file attachment ins
 _DESCRIPTION_CAP = 50  # Discord option description max; keep short for 8 KiB tree limit
 _LOG = logging.getLogger(__name__)
 
+# --------------------------------------------------------------------------- #
+# Provider metadata for rich embeds
+# --------------------------------------------------------------------------- #
+_PROVIDER_META: dict[str, dict[str, str]] = {
+    "janitor": {
+        "emoji": "🤖",
+        "color": "blurple",
+        "url": "https://janitorai.com",
+        "description": "JanitorAI character extraction",
+    },
+    "saucepan": {
+        "emoji": "🫕",
+        "color": "gold",
+        "url": "https://saucepan.ai",
+        "description": "Saucepan companion extraction",
+    },
+    "clank": {
+        "emoji": "⚙️",
+        "color": "green",
+        "url": "https://clank.world",
+        "description": "clank.world character extraction",
+    },
+    "spicychat": {
+        "emoji": "🌶️",
+        "color": "red",
+        "url": "https://spicychat.ai",
+        "description": "SpicyChat character extraction",
+    },
+    "tavern": {
+        "emoji": "🏰",
+        "color": "teal",
+        "url": "https://tavernai.net",
+        "description": "TavernAI card extraction",
+    },
+    "chub": {
+        "emoji": "📦",
+        "color": "purple",
+        "url": "https://chub.ai",
+        "description": "Chub character extraction",
+    },
+    "misc": {
+        "emoji": "📋",
+        "color": "greyple",
+        "url": "",
+        "description": "Status and diagnostics",
+    },
+}
+
+
+_color_map: dict[str, object] | None = None
+
+
+def _provider_color(name: str) -> object:
+    """Return a discord.Color for *name*.  Safe to call at module scope
+    (discord is not imported at the top level).
+    """
+    global _color_map  # noqa: PLW0603
+    import discord as _discord
+
+    if _color_map is None:
+        _color_map = {
+            "blurple": _discord.Color.blurple(),
+            "gold": _discord.Color.gold(),
+            "green": _discord.Color.green(),
+            "red": _discord.Color.red(),
+            "teal": _discord.Color.teal(),
+            "purple": _discord.Color.purple(),
+            "greyple": _discord.Color.greyple(),
+            "orange": _discord.Color.orange(),
+        }
+    meta = _PROVIDER_META.get(name, _PROVIDER_META["misc"])
+    return _color_map.get(meta.get("color", "greyple"), _discord.Color.greyple())
+
 # Buffers for streaming partial CLI output to the progress embed, keyed by user_id.
 # Written by the worker thread, read by the asyncio timer task.
 _progress_by_user: dict[int, "ProgressCapture"] = {}
@@ -68,6 +141,7 @@ class ProgressCapture(io.StringIO):
 _ROOT_ACTIONS: dict[str, str] = {
     "extract": "Extract one character or supported card URL.",
     "status": "Show the auth state of every provider and the library.",
+    "help": "Show usage tips, examples, and provider info.",
 }
 _PROVIDER_ACTIONS: dict[str, dict[str, str]] = {
     "janitor": {
@@ -517,8 +591,8 @@ def _configure_logging(verbose: int) -> None:
 
 
 _ERROR_HINTS: list[tuple[tuple[str, ...], str]] = [
-    (("login", "log in", "authenticate", "unauthorized", "token"), "Run `/rip <provider> login` first to authenticate."),
-    (("session", "cookie", "expired"), "Your session may have expired. Try `/rip <provider> login` again."),
+    (("login", "log in", "authenticate", "unauthorized", "token"), "Run {login_cmd} first to authenticate."),
+    (("session", "cookie", "expired"), "Your session may have expired. Try {login_cmd} again."),
     (("timeout", "timed out"), "The request timed out. Try again — if it persists, the provider may be slow."),
     (("not found", "404", "no character"), "Double-check the URL or UUID — the character may have been deleted."),
     (("rate limit", "429", "too many requests"), "Slow down! The provider is rate-limiting requests. Wait a moment and try again."),
@@ -526,14 +600,38 @@ _ERROR_HINTS: list[tuple[tuple[str, ...], str]] = [
 ]
 
 
-def _error_hint(output: str, command_label: str) -> str | None:
+def _error_hint(output: str, command_label: str, *, mention: Callable[..., str]) -> str | None:
+    """Return a human-friendly hint based on common error patterns.
+
+    The hint is embedded in the result embed as an actionable suggestion.
+    ``mention`` is a callable (e.g. ``client.cmd_mention``) used to render
+    slash-command mentions in hint templates.
+    """
     low = output.lower()
+    provider = command_label.split()[0] if " " in command_label else None
     for keywords, hint in _ERROR_HINTS:
         if any(kw in low for kw in keywords):
+            if "{login_cmd}" in hint and provider:
+                hint = hint.replace("{login_cmd}", mention(provider, "login"))
             return hint
     if "error:" in low[:200] or "traceback" in low:
         return "An unexpected error occurred. Check the logs or run with `-v` for more details."
     return None
+
+
+def _elapsed_pretty(seconds: float) -> str:
+    """Human-readable elapsed time: ``1m 23s`` or ``45s``."""
+    s = int(seconds)
+    m, s = divmod(s, 60)
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _status_emoji(ok: bool, text: str = "") -> str:
+    if "Timed out" in text:
+        return "⚠️"
+    return "✅" if ok else "❌"
 
 
 _HOT_RELOAD_LOCK = asyncio.Lock()
@@ -569,7 +667,7 @@ async def _hot_reload_watcher(client, ripart_root: str) -> None:
     """Watch ``ripart/`` for ``.py`` changes and reload modules in-place."""
     import watchfiles
 
-    async for changes in watchfiles.awatch(ripart_root, poll_intervals=1000):
+    async for changes in watchfiles.awatch(ripart_root):
         py_changed: set[str] = set()
         for _, path in changes:
             if path.endswith(".py"):
@@ -631,18 +729,23 @@ def _build_commands(
         user_id = interaction.user.id
         limited = is_extraction and user_id not in admin_ids
         if limited:
-            existing = queue.active_job(user_id)
-            if existing is not None:
+            # reserve() is the atomic check-and-claim: if it fails, the user
+            # already holds their single extraction slot.
+            if not queue.reserve(user_id, command_label, provider):
+                existing = queue.active_job(user_id)
+                running = (
+                    f"Currently running: `{existing.command_label}` on **{existing.provider}** lane.\n"
+                    if existing is not None else ""
+                )
                 msg = (
                     "⛔ You already have a command running or queued.\n"
-                    f"Currently running: `{existing.command_label}` on **{existing.provider}** lane.\n"
+                    f"{running}"
                     "Only one at a time — wait for it to finish."
                 )
                 await interaction.response.send_message(
                     embed=_embed(title, msg, discord.Color.red()), ephemeral=True,
                 )
                 return
-            queue.reserve(user_id, command_label, provider)
 
         is_public = is_extraction
 
@@ -660,10 +763,11 @@ def _build_commands(
         finished = asyncio.Event()
 
         async def on_queued(position: int) -> None:
-            note = (
-                "Starting now…" if position == 1
-                else f"Queued — position {position} in the **{provider}** lane."
-            )
+            meta = _PROVIDER_META.get(provider, _PROVIDER_META["misc"])
+            if position == 1:
+                note = f"Starting now… {meta['emoji']}"
+            else:
+                note = f"Queued — position {position} in the **{provider}** lane {meta['emoji']}"
             await interaction.edit_original_response(
                 embed=make_embed(f"⌛ {note}", discord.Color.blurple())
             )
@@ -672,8 +776,9 @@ def _build_commands(
             nonlocal started_at
             started_at = time.monotonic()
             finished.clear()
+            meta = _PROVIDER_META.get(provider, _PROVIDER_META["misc"])
             await interaction.edit_original_response(
-                embed=make_embed("▶ Running", discord.Color.gold())
+                embed=make_embed(f"▶ Running {meta['emoji']} **{provider}**", discord.Color.gold())
             )
             refresh_tasks.append(
                 asyncio.create_task(refresh_status(), name="ripart-discord-status")
@@ -690,20 +795,23 @@ def _build_commands(
         refresh_tasks: list[asyncio.Task] = []
 
         async def refresh_status() -> None:
+            """Tick the elapsed timer and show live progress while the job runs."""
             while not finished.is_set():
                 try:
                     await asyncio.wait_for(finished.wait(), timeout=3)
                     return
                 except asyncio.TimeoutError:
                     pass
-                elapsed = int(time.monotonic() - started_at) if started_at else 0
-                fields = [("Elapsed", f"{elapsed}s")]
+                elapsed = time.monotonic() - started_at if started_at else 0
+                fields: list[tuple[str, str]] = [("Elapsed", _elapsed_pretty(elapsed))]
                 buf = _progress_by_user.get(user_id)
                 if buf and buf.step:
-                    fields.append(("Step", buf.step))
+                    fields.append(("Step", f"`{buf.step}`"))
+                meta = _PROVIDER_META.get(provider, _PROVIDER_META["misc"])
+                status = f"▶ Running {meta['emoji']} **{provider}**"
                 with contextlib.suppress(Exception):
                     await interaction.edit_original_response(
-                        embed=make_embed("▶ Running", discord.Color.gold(), fields)
+                        embed=make_embed(status, discord.Color.gold(), fields)
                     )
 
         buf = ProgressCapture()
@@ -738,8 +846,12 @@ def _build_commands(
             "finished `%s` for %s — %s in %ds",
             command_label, interaction.user, "ok" if result.ok else "fail", duration,
         )
-        status_text = "✅ Completed" if result.ok else "❌ Failed"
-        color = discord.Color.green() if result.ok else discord.Color.gold() if "Timeout" in (result.text or "") else discord.Color.red()
+        emoji = _status_emoji(result.ok, result.text or "")
+        status_text = f"{emoji} {'Completed' if result.ok else 'Failed'}"
+        if "Timed out" in (result.text or ""):
+            color = discord.Color.orange()
+        else:
+            color = discord.Color.green() if result.ok else discord.Color.red()
         output = result.text or "(no output)"
         long_output = len(output) > _INLINE_OUTPUT_LIMIT
         attachment = (
@@ -747,24 +859,49 @@ def _build_commands(
             if long_output else None
         )
 
-        result_embed = _embed(title, status_text, color, [("Duration", f"{duration}s")])
+        meta = _PROVIDER_META.get(provider, _PROVIDER_META["misc"])
+        provider_color = _provider_color(provider)
+        result_color = provider_color if result.ok else color
+
+        result_embed = _embed(title, status_text, result_color, [("Duration", _elapsed_pretty(duration))])
+        if is_extraction and provider != "misc":
+            result_embed.add_field(
+                name="Provider",
+                value=f"{meta['emoji']} **{provider.title()}**",
+                inline=True,
+            )
+
         if command_label == "status":
             snap = queue.snapshot()
-            result_embed.add_field(name="Bot uptime", value=_fmt_uptime(time.monotonic() - bot_started))
-            result_embed.add_field(name="In flight", value=str(snap["in_flight"]))
-            result_embed.add_field(name="Busy lanes", value=", ".join(snap["busy_lanes"]) or "idle")
+            result_embed.add_field(name="⏱️ Bot uptime", value=_fmt_uptime(time.monotonic() - bot_started))
+            result_embed.add_field(name="🚀 In flight", value=str(snap["in_flight"]))
+            lanes = ", ".join(snap["busy_lanes"]) or "—"
+            result_embed.add_field(name="🛤️ Busy lanes", value=lanes)
             if snap["busy_users"]:
-                result_embed.add_field(name="Active users", value="\n".join(snap["busy_users"][:5]), inline=False)
-            result_embed.add_field(name="Admins", value=str(len(admin_ids)))
+                result_embed.add_field(
+                    name="👥 Active users",
+                    value="\n".join(snap["busy_users"][:5]),
+                    inline=False,
+                )
+            result_embed.add_field(name="🛡️ Admins", value=str(len(admin_ids)))
+
         if not result.ok and output and output != "(no output)":
-            hint = _error_hint(output, command_label)
+            hint = _error_hint(output, command_label, mention=interaction.client.cmd_mention)
             if hint:
-                result_embed.add_field(name="💡 Hint", value=hint, inline=False)
+                result_embed.add_field(name="💡 Suggestion", value=hint, inline=False)
 
         if long_output:
-            result_embed.add_field(name="Output", value="Attached as `rip-output.txt`.", inline=False)
+            result_embed.add_field(
+                name="📄 Output",
+                value="Attached as `rip-output.txt`.",
+                inline=False,
+            )
         elif output != "(no output)":
-            result_embed.description = f"{status_text}\n```\n{output}\n```"
+            # Truncate for embed limit (6 000 chars for description)
+            snippet = output[:1_500]
+            if len(output) > 1_500:
+                snippet += "\n\n… (truncated)"
+            result_embed.add_field(name="📄 Output", value=f"```\n{snippet}\n```", inline=False)
 
         async def _send_private(payload, **kw):
             try:
@@ -785,9 +922,12 @@ def _build_commands(
                     pass
 
         if is_public:
-            await interaction.edit_original_response(
-                embed=make_embed(status_text, color, [("Duration", f"{duration}s")])
+            public_embed = make_embed(
+                f"{emoji} **{provider.title()}** — {status_text}",
+                result_color,
+                [("Duration", _elapsed_pretty(duration))],
             )
+            await interaction.edit_original_response(embed=public_embed)
             if attachment is not None:
                 await _send_private({"embed": result_embed, "file": attachment})
             else:
@@ -801,7 +941,78 @@ def _build_commands(
         name="rip", description="Queue RIPart actions — providers run in parallel."
     )
 
+    async def _help_command(interaction) -> None:
+        """Show usage tips, examples, and provider info."""
+        embed = discord.Embed(
+            title="📚 RIPart — Quick Reference",
+            description="Extract AI characters and lorebooks from multiple providers.",
+            color=discord.Color.blurple(),
+        )
+        embed.set_author(
+            name=interaction.user.display_name,
+            icon_url=interaction.user.display_avatar.url,
+        )
+
+        # --- Getting started ---
+        embed.add_field(
+            name="🚀 Getting Started",
+            value=(
+                "1. Use `/rip <provider> login` to authenticate with a provider\n"
+                "2. Use `/rip extract <url>` to extract a character\n"
+                "3. Use `/rip status` to check auth state and queue"
+            ),
+            inline=False,
+        )
+
+        # --- Extract examples ---
+        embed.add_field(
+            name="🔍 Extraction Examples",
+            value=(
+                "`/rip extract <janitorai-url>` — JanitorAI\n"
+                "`/rip extract <saucepan-url>` — Saucepan\n"
+                "`/rip extract <clank-url>` — clank.world\n"
+                "`/rip extract <spicychat-url>` — SpicyChat\n"
+                "`/rip extract <tavern-url>` — TavernAI card\n"
+                "`/rip extract <chub-url>` — Chub"
+            ),
+            inline=False,
+        )
+
+        # --- Providers ---
+        provider_lines = []
+        for name, meta in _PROVIDER_META.items():
+            if name == "misc":
+                continue
+            provider_lines.append(f"{meta['emoji']} **{name.title()}** — {meta['description']}")
+        embed.add_field(
+            name="🏷️ Providers",
+            value="\n".join(provider_lines),
+            inline=False,
+        )
+
+        # --- Tips ---
+        embed.add_field(
+            name="💡 Tips",
+            value=(
+                "• URLs are auto-detected — paste any supported URL\n"
+                "• One extraction per person at a time\n"
+                "• Use `/rip status` to see queue and auth info\n"
+                "• Login sessions are saved locally"
+            ),
+            inline=False,
+        )
+
+        embed.set_footer(text="RIPart — free AI character extraction")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     def add_action(parent, *, prefix: tuple[str, ...], action: str, description: str) -> None:
+        # Special-case: the `help` action is a Discord-only command with no CLI counterpart.
+        if action == "help" and not prefix:
+            parent.add_command(
+                app_commands.Command(name="help", description=description, callback=_help_command)
+            )
+            return
+
         fields = action_options(prefix, action)
         is_extraction = action == "extract"
 
@@ -918,18 +1129,39 @@ def run_discord_bot(*, verbose: int = 0, reload: bool = False) -> None:
             self._bot_started = bot_started
             self._reload = reload
             self._ripart_root = ripart_root
+            self._cmd_mentions: dict[str, str] = {}
+
+        def _build_cmd_map(self, synced: list) -> None:
+            from discord.app_commands.models import AppCommandGroup as Acg
+            def walk(opt, prefix):
+                if not hasattr(opt, 'options'):
+                    return
+                for sub in opt.options:
+                    if isinstance(sub, Acg):
+                        self._cmd_mentions[sub.qualified_name] = sub.mention
+                        walk(sub, prefix)
+            self._cmd_mentions.clear()
+            for cmd in synced:
+                self._cmd_mentions[cmd.name] = cmd.mention
+                walk(cmd, cmd.name)
+
+        def cmd_mention(self, *parts: str) -> str:
+            path = " ".join(parts)
+            return self._cmd_mentions.get(path, f"/rip {path}")
 
         async def _rebuild_commands(self) -> None:
             self.tree.clear_commands(guild=discord.Object(id=guild_id))
             self.tree.clear_commands(guild=None)
             _build_commands(self, guild_id, channel_id, admin_ids, queue, bot_started)
-            await self.tree.sync(guild=discord.Object(id=guild_id))
+            synced = await self.tree.sync(guild=discord.Object(id=guild_id))
+            self._build_cmd_map(synced)
 
         async def setup_hook(self) -> None:
             self.tree.clear_commands(guild=None)
             await self.tree.sync()
             _build_commands(self, guild_id, channel_id, admin_ids, queue, bot_started)
             synced = await self.tree.sync(guild=discord.Object(id=guild_id))
+            self._build_cmd_map(synced)
             _LOG.info(
                 "gateway ready as %s — guild %s, channel %s, %d admin(s); %d command(s) synced",
                 self.user, guild_id, channel_id or "any", len(admin_ids), len(synced),

@@ -94,7 +94,9 @@ def test_discord_payload_loggers_are_silenced_at_verbose_levels():
 def test_discord_actions_cover_the_public_cli_tree():
     from ripart.cli import main
 
-    assert set(_ROOT_ACTIONS) == set(main.commands) - {
+    # `help` is a Discord-only command with no CLI counterpart.
+    discord_only = {"help"}
+    assert set(_ROOT_ACTIONS) - discord_only == set(main.commands) - {
         "janitor",
         "saucepan",
         "clank",
@@ -108,6 +110,8 @@ def test_discord_actions_cover_the_public_cli_tree():
 
 def test_every_discord_action_generates_a_form_schema():
     for action in _ROOT_ACTIONS:
+        if action == "help":
+            continue  # Discord-only; no CLI command to introspect.
         action_options((), action)
     for provider, actions in _PROVIDER_ACTIONS.items():
         for action in actions:
@@ -119,6 +123,7 @@ def test_discord_command_schema_descriptions_fit_the_platform_limit():
         *(
             option
             for action in _ROOT_ACTIONS
+            if action != "help"
             for option in action_options((), action)
         ),
         *(
