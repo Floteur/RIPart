@@ -70,6 +70,25 @@ def test_janitor_card_and_lorebook_text_use_sillytavern_user_macro():
     assert lorebook["entries"] == ["{{user}} lore"]
 
 
+def test_gated_card_recovers_every_greeting_from_the_echo():
+    # Gated card: JanitorAI nulls first_messages content, so the greetings only
+    # survive as assistant turns in the echoed prompt. All must be captured, not
+    # just the primary.
+    meta = {"first_messages": [None, None], "name": "X"}
+    payload = {
+        "messages": [
+            {"role": "system", "content": "<X's Persona>desc</X's Persona>"},
+            {"role": "assistant", "content": "Greeting ONE"},
+            {"role": "assistant", "content": "Greeting TWO"},
+        ]
+    }
+
+    character = build_character(meta, payload, "", "desc")
+
+    assert character["firstMessage"] == "Greeting ONE"
+    assert character["alternateGreetings"] == ["Greeting TWO"]
+
+
 def test_trigger_search_messages_prioritize_headings_and_distinctive_words():
     probes = build_trigger_search_messages(
         ["NEIGHBORHOOD CORE RULES\nEvery neighborhood has a distinctive bakery."]

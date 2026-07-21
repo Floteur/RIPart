@@ -88,15 +88,29 @@ def extract_example(payload: dict[str, Any]) -> str:
     return match.group(1).strip() if match else ""
 
 
-def extract_first_message(payload: dict[str, Any]) -> str:
+def extract_greetings(payload: dict[str, Any]) -> list[str]:
+    """Every assistant turn in the echoed prompt = a character greeting.
+
+    JanitorAI echoes each first-message/alternate-greeting as its own assistant
+    turn, so collect them all - not just the first (see ``extract_first_message``,
+    which is only the primary).
+    """
+    out: list[str] = []
     for message in (payload or {}).get("messages") or []:
         if (
             message
             and message.get("role") == "assistant"
             and isinstance(message.get("content"), str)
         ):
-            return message["content"].strip()
-    return ""
+            text = message["content"].strip()
+            if text:
+                out.append(text)
+    return out
+
+
+def extract_first_message(payload: dict[str, Any]) -> str:
+    greetings = extract_greetings(payload)
+    return greetings[0] if greetings else ""
 
 
 def parse_leaked_definition(text: str) -> dict[str, str]:
@@ -176,7 +190,8 @@ def build_lorebook_trigger_messages(
     """Build chat messages that fire as many closed-lorebook keys as possible."""
     meta = meta or {}
     card = (card or "").strip()
-    first_message = str(meta.get("first_message") or "").strip()
+    greetings = collect_greetings(meta)
+    first_message = greetings[0] if greetings else ""
     primary = f"{card}\n\n{first_message}" if first_message else card
     candidates: list[str] = []
     if primary.strip():
@@ -186,7 +201,7 @@ def build_lorebook_trigger_messages(
     candidates.extend(split_text_chunks(catalog, chunk_size))
 
     seen_greetings: set[str] = set()
-    for greeting in collect_greetings(meta, first_message):
+    for greeting in greetings:
         text = str(greeting or "").strip()
         if not text:
             continue
@@ -416,11 +431,20 @@ def separate(
 
 
 def collect_greetings(
-    meta: dict[str, Any] | None, captured_first: str = ""
+    meta: dict[str, Any] | None, captured: str | list[str] = ""
 ) -> list[str]:
+    """All greetings for a card, deduped, primary first.
+
+    Merges the metadata greetings (``first_messages`` - JanitorAI's real field;
+    items are null when the definition is gated) with greetings ``captured`` from
+    the generateAlpha echo. For gated cards the metadata is null-filled, so the
+    echoed assistant turns are the only source - hence a merge, not a fallback.
+    """
     out: list[str] = []
 
     def push(value: Any) -> None:
+        if isinstance(value, dict):  # some payloads wrap the text in an object
+            value = value.get("message") or value.get("content") or value.get("text")
         text = normalize_user_placeholder(str(value or "").strip())
         if text and text not in out:
             out.append(text)
@@ -431,8 +455,8 @@ def collect_greetings(
         push(meta.get("first_message"))
         for value in meta.get("alternate_greetings") or []:
             push(value)
-    if not out:
-        push(captured_first)
+    for value in [captured] if isinstance(captured, str) else (captured or []):
+        push(value)
     return out
 
 
@@ -454,7 +478,7 @@ def build_character(
     card: str = "",
 ) -> dict[str, Any]:
     meta = meta or {}
-    greetings = collect_greetings(meta, extract_first_message(payload or {}))
+    greetings = collect_greetings(meta, extract_greetings(payload or {}))
     public = is_card_public(meta)
     return {
         "name": extract_char_name(payload or {}) or meta.get("name") or "",

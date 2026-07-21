@@ -386,14 +386,20 @@ def _card_provenance(
 ) -> dict[str, Any]:
     meta = meta or {}
     character = character or {}
+    from .. import __version__ as ripart_version  # deferred: avoids import cycle
+
+    source = character.get("definitionSource") or ""
     ripart: dict[str, Any] = {
         "ripper": "ripart-cli",
+        # Which ripper build + method produced this dump, e.g.
+        # "ripart-cli/0.1.0 proxy" - lets a re-rip be compared against its source.
+        "dump_version": f"ripart-cli/{ripart_version}{' ' + source if source else ''}",
         "creator_id": meta.get("creator_id") or "",
         "source_url": source_url,
         "nsfw": bool(meta.get("is_nsfw")),
         # How the definition was obtained: "janitor" (public meta), "proxy"
         # (exact prompt echo), or "reconstructed-jllm" (lossy JanitorLLM leak).
-        "definition_source": character.get("definitionSource") or "",
+        "definition_source": source,
     }
     reconstruction = character.get("reconstruction")
     if isinstance(reconstruction, dict) and reconstruction:

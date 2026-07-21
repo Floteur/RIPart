@@ -26,6 +26,7 @@ from .payloads import (
     build_character,
     build_lorebook_trigger_messages,
     build_trigger_search_messages,
+    collect_greetings,
     extract_card,
     is_card_public,
     merge_separated_results,
@@ -1646,7 +1647,8 @@ def _extract_character(
         if mode == "jllm":
             _clog("creating chat (JanitorLLM leak)")
             chat_id = _create_chat(driver, character_id)
-            first_message = str(meta.get("first_message") or "").strip()
+            greetings = collect_greetings(meta)
+            first_message = greetings[0] if greetings else ""
             base_messages = (
                 [_synth_bot_message(chat_id, character_id, first_message)]
                 if first_message
@@ -1720,7 +1722,8 @@ def _extract_character(
 
         _clog("creating chat")
         chat_id = _create_chat(driver, character_id)
-        first_message = str(meta.get("first_message") or "").strip()
+        greetings = collect_greetings(meta)
+        first_message = greetings[0] if greetings else ""
         base_messages = (
             [_synth_bot_message(chat_id, character_id, first_message)]
             if first_message
