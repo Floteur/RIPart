@@ -1881,36 +1881,30 @@ def completion(shell: str | None) -> None:
     "--reload",
     "reload_",
     is_flag=True,
-    help="Dev: auto-restart the bot whenever a source file changes.",
+    help="Dev: hot-patch code changes into the live bot without dropping running jobs.",
 )
 def discord_bot(verbose: int, reload_: bool) -> None:
     """Serve the one-at-a-time `/rip` Discord command gateway."""
     from .common.discord_bot import run_discord_bot
 
-    if not reload_:
-        run_discord_bot(verbose=verbose)
-        return
+    if reload_:
+        try:
+            import jurigged
+        except ImportError:
+            raise SystemExit("--reload needs jurigged — install it with `uv sync --extra discord`")
+        # Hot-patch changed functions straight into the running interpreter
+        # instead of restarting, so extractions already in flight keep going.
+        # Caveat: structural changes (new/removed slash commands, changed command
+        # schemas, class layout) still need a manual restart — the command tree
+        # is built and synced once at startup and jurigged only patches function
+        # bodies.
+        jurigged.watch(str(Path(__file__).resolve().parent))
+        console.print(
+            "[dim]hot-reload on (jurigged) — saved edits patch the live bot; "
+            "restart for new/renamed commands[/]"
+        )
 
-    try:
-        from watchfiles import run_process
-    except ImportError:
-        raise SystemExit("--reload needs watchfiles — install it with `uv sync --extra discord`")
-
-    # Run the bot as a real subprocess (not a multiprocessing-spawn callable) so
-    # a reload's SIGINT reaches discord.py's own handler and the gateway closes
-    # gracefully — no mid-import KeyboardInterrupt traceback, no SIGKILL.
-    import shlex
-
-    argv = [sys.executable, "-m", "ripart", "discord-bot"]
-    if verbose:
-        argv.append("-" + "v" * verbose)
-    console.print("[dim]watching ripart/ — the bot restarts on save (Ctrl-C to stop)[/]")
-    run_process(
-        Path(__file__).resolve().parent,  # the ripart package
-        target=shlex.join(argv),
-        target_type="command",
-        callback=lambda changes: console.print(f"[dim]↻ reloading — {len(changes)} file(s) changed[/]"),
-    )
+    run_discord_bot(verbose=verbose)
 
 
 if __name__ == "__main__":

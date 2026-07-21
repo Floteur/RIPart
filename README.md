@@ -132,11 +132,14 @@ detail and `-vv` to also unmute discord.py's client log:
 `uv run --extra discord rip discord-bot -v`. Raw Discord API payloads are never
 logged at any level.
 
-During development, `--reload` restarts the bot whenever a source file under
-`ripart/` changes, so you don't have to kill and relaunch after each edit
+During development, `--reload` hot-patches changed code straight into the
+running bot when you save a file under `ripart/`, so you don't have to kill and
+relaunch after each edit — and extractions already in flight keep running
 (`uv run --extra discord rip discord-bot --reload`). It uses
-[watchfiles](https://pypi.org/project/watchfiles/) (installed with the
-`discord` extra); leave it off in production.
+[jurigged](https://pypi.org/project/jurigged/) (installed with the `discord`
+extra). Because it only patches function bodies, structural changes (new or
+renamed slash commands, changed command inputs) still need a manual restart —
+the command tree is synced once at startup. Leave it off in production.
 
 The bot registers discoverable commands such as `/rip janitor extract`,
 `/rip saucepan list`, and `/rip clank status` in `DISCORD_GUILD_ID`. `/rip

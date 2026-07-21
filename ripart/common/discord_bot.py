@@ -433,6 +433,9 @@ def _configure_logging(verbose: int) -> None:
     contents), so they stay at WARNING at every verbosity. The webhook logger is
     pinned too: its DEBUG lines print the interaction-token-bearing callback URL
     (a secret) on every message edit, including the 3s elapsed-timer refresh.
+    The httpx/httpcore loggers (used by discord.py and the card publisher) are
+    pinned too — their DEBUG stream is a per-request flood that dumps full
+    response headers, including ``set-cookie``.
     """
     logging.basicConfig(
         level=logging.DEBUG if verbose > 1 else logging.INFO,
@@ -444,6 +447,8 @@ def _configure_logging(verbose: int) -> None:
     logging.getLogger("discord.http").setLevel(logging.WARNING)
     logging.getLogger("discord.gateway").setLevel(logging.WARNING)
     logging.getLogger("discord.webhook").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.INFO if verbose > 1 else logging.WARNING)
 
 
 def run_discord_bot(*, verbose: int = 0) -> None:
@@ -635,6 +640,10 @@ def run_discord_bot(*, verbose: int = 0) -> None:
         elif output != "(no output)":
             result_embed.description = f"{status}\n```\n{output}\n```"
 
+        # discord.py rejects an explicit ``file=None`` (its default is MISSING,
+        # not None), so only pass the file kwarg when there is an attachment.
+        file_kwargs = {"file": attachment} if attachment is not None else {}
+
         if is_public:
             # Progress stays public (no output); the requester gets the output
             # in a private follow-up so the guild never sees the ripped data.
@@ -642,7 +651,7 @@ def run_discord_bot(*, verbose: int = 0) -> None:
                 embed=make_embed(status, color, [("Duration", f"{duration}s")])
             )
             await interaction.followup.send(
-                embed=result_embed, file=attachment, ephemeral=True
+                embed=result_embed, ephemeral=True, **file_kwargs
             )
         else:
             # Already ephemeral — deliver everything in the single original

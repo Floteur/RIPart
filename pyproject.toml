@@ -19,8 +19,8 @@ dependencies = [
 [project.optional-dependencies]
 # Dev/test extras: `uv sync --extra dev` (or `pip install -e .[dev]`).
 dev = ["pytest>=8"]
-# `--reload` (dev auto-restart) uses watchfiles' run_process.
-discord = ["discord.py>=2.4,<3", "watchfiles>=0.24"]
+# `--reload` hot-patches changed code into the live bot via jurigged.
+discord = ["discord.py>=2.4,<3", "jurigged>=0.5"]
 
 [project.scripts]
 rip = "ripart.cli:main"
