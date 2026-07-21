@@ -12,9 +12,9 @@ token back. Note that authenticating does **not** unlock a gated definition
 (``definition_visible: false``) — those stay server-side regardless — so login
 mainly matters for NSFW visibility and rate limits.
 
-Session state (guest id + tokens) lives in a gitignored, owner-only
-``.spicychat-session.json`` at the package root, with a per-thread override so
-the leak bench can drive several accounts from one process. Built on the shared
+Session state (guest id + tokens) lives in RIPart's owner-only application-state
+directory, with a per-thread override so the leak bench can drive several
+accounts from one process. Built on the shared
 :class:`~ripart.common.http.HttpClient` and :class:`~ripart.common.creds.CredentialStore`.
 """
 
@@ -34,6 +34,7 @@ from ...common.avatar import fetch_avatar as _fetch_avatar
 from ...common.creds import CredentialStore
 from ...common.errors import RipError
 from ...common.http import HttpClient
+from ...common.storage import state_path
 
 # Hosts. The REST API, the Kinde auth server, the image CDN and the public
 # Typesense search cluster are four different origins; the pooled client is
@@ -56,9 +57,10 @@ SPICYCHAT_UA = (
 )
 TIMEOUT = 30
 
-# Session state at the package root, gitignored. A small JSON object:
+# Session state in the application-state directory. A small JSON object:
 # {"guest_id", "refresh_token", "access_token", "access_expiry"}. Never printed.
-SESSION_FILE = Path(__file__).resolve().parents[2] / ".spicychat-session.json"
+_LEGACY_SESSION_FILE = Path(__file__).resolve().parents[2] / ".spicychat-session.json"
+SESSION_FILE = state_path("spicychat-session.json")
 
 
 class SpicyChatError(RipError):
@@ -73,7 +75,13 @@ _http = HttpClient(
     error_cls=SpicyChatError,
     timeout=TIMEOUT,
 )
-_creds = CredentialStore(SESSION_FILE, empty={}, loads=json.loads, dumps=json.dumps)
+_creds = CredentialStore(
+    SESSION_FILE,
+    empty={},
+    loads=json.loads,
+    dumps=json.dumps,
+    legacy_path=_LEGACY_SESSION_FILE,
+)
 
 
 def set_trace_level(level: int) -> None:

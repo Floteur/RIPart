@@ -6,9 +6,9 @@ the model at generation time. The leak recovers it verbatim with an **echo
 proxy** — an OpenAI-compatible endpoint that echoes the request body back as the
 assistant reply — whose ``developer`` message is the character's system prompt.
 
-Auth is the browser's ``next-auth`` session cookie, persisted to a gitignored
-``.clank-session.json`` at the package root. This package re-exports the public
-surface so callers can ``from ripart.providers import clank as ck``.
+Auth is the browser's ``next-auth`` session cookie, persisted in RIPart's
+application-state directory. This package re-exports the public surface so
+callers can ``from ripart.providers import clank as ck``.
 """
 
 from __future__ import annotations

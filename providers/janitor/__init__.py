@@ -4,7 +4,8 @@ JanitorAI has no public definition API, so this provider drives a real headless
 Chromium via Botasaurus (:mod:`~ripart.providers.janitor.browser_tasks`) to read
 the assembled prompt, then parses it into a card
 (:mod:`~ripart.providers.janitor.payloads`). The login profile and exported
-session live at the package root, mirroring the other providers' credential files.
+session live in RIPart's application-state directory, alongside the other
+providers' credentials.
 
 This package re-exports the Botasaurus task entry points and the pure payload
 parsers so callers can ``from ripart.providers import janitor``.

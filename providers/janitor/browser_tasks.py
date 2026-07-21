@@ -20,6 +20,7 @@ from botasaurus_driver import cdp
 from botasaurus_driver.cdp.network import CookieParam, CookieSameSite, TimeSinceEpoch
 
 from ...common.cards import build_world_info, save_to_library
+from ...common.storage import state_path
 from ...common.text import html_to_text, norm as _norm
 from .payloads import (
     ORIGIN,
@@ -36,12 +37,12 @@ from .payloads import (
 )
 
 
-PROFILE = str(Path(__file__).resolve().parents[2] / ".rip-botasaurus-profile")
+PROFILE = str(state_path("janitor-browser-profile"))
 # A fresh, importable snapshot of the logged-in cookies. Every logged-in run
 # rewrites it, so it tracks the auto-refreshed auth token and is always ready
 # for `rip import-session` if the browser profile is ever wiped. Lives in the
-# package dir (next to the code), which is where sessions are exported/imported.
-SESSION_FILE = str(Path(__file__).resolve().parents[2] / ".janitor-session.json")
+# RIPart state directory, alongside the persistent browser profile.
+SESSION_FILE = str(state_path("janitor-session.json"))
 PROFILE_URL = f"{ORIGIN}/hampter/profiles/mine"
 PERSONAS_URL = f"{ORIGIN}/hampter/personas"
 PERSONAS_LIST_URL = f"{ORIGIN}/hampter/personas/mine"
@@ -353,6 +354,7 @@ def _export_session(driver, path: str = SESSION_FILE) -> int:
     if not has_auth:
         return 0
     try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         tmp = f"{path}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(kept, fh, indent=2)
@@ -663,7 +665,7 @@ def _lorebook_refs(meta: dict[str, Any] | None) -> list[dict[str, str]]:
     for item in (meta or {}).get("scripts") or []:
         if (
             item
-            and item.get("type") in ("lorebook", "advanced")
+            and item.get("type") in ("lorebook", "advanced", "script")
             and item.get("id") is not None
         ):
             refs.append({"id": str(item["id"]), "title": item.get("title") or ""})
@@ -681,6 +683,25 @@ def _parse_script_entries(record: dict[str, Any]) -> list[dict[str, Any]]:
         except json.JSONDecodeError:
             return []
     return []
+
+
+def _script_source_code(record: dict[str, Any]) -> str:
+    """Return the raw JS source for a pure Script entry, else ``""``.
+
+    Traditional lorebooks store a world-info *list* in ``record["script"]``;
+    JanitorAI Scripts (the ``advanced``/``script`` type - JS middleware) store
+    source *code* there instead. ``_parse_script_entries`` yields nothing for
+    the latter, so this recovers the code so it is not silently dropped.
+    """
+    raw = record.get("script")
+    if not isinstance(raw, str) or not raw.strip():
+        return ""
+    try:
+        if isinstance(json.loads(raw), list):
+            return ""  # it was a JSON-encoded world-info list, not JS source
+    except json.JSONDecodeError:
+        pass
+    return raw.strip()
 
 
 def _script_character_refs(record: dict[str, Any]) -> list[dict[str, str]]:
@@ -725,6 +746,18 @@ def _public_lorebook_from_response(
         if not isinstance(record, dict):
             raise ValueError("script response was not an object")
         entries = _parse_script_entries(record)
+        script_code = _script_source_code(record) if not entries else ""
+        if script_code:
+            # Pure JS Script, not a world-info list. Preserve the source verbatim
+            # as a disabled entry: SillyTavern never injects disabled entries, so
+            # this is archival-only for manual review (same policy as closed lore).
+            entries = [
+                {
+                    "content": script_code,
+                    "comment": f"JanitorAI Script source ({record.get('title') or ref['title'] or 'script'})",
+                    "disable": True,
+                }
+            ]
         world_info = build_world_info(entries)
         count = len(world_info["entries"])
         return {

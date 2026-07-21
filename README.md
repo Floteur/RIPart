@@ -175,8 +175,8 @@ PNG as every other provider.
 
 Saucepan serves companion definitions through an authenticated REST API, so
 ripping needs **no browser** - it is a direct, exact pull rather than a
-reconstruction. Log in once (the bearer token is saved to a gitignored
-`.saucepan-token` and reused), then extract:
+reconstruction. Log in once; the bearer token is saved under
+`~/.local/state/ripart/` (or `$XDG_STATE_HOME/ripart/`) and reused, then extract:
 
 ```bash
 rip saucepan login                 # store a bearer token (prompts for username + password)
@@ -402,7 +402,8 @@ paths (`output/cli/library/<id>.png`, a self-contained V3 card).
 **Auth.** clank uses `next-auth`, so there is no username/password API login.
 Copy the `__Secure-next-auth.session-token` cookie from your browser (dev tools
 → Application → Cookies → `www.clank.world`) and paste it into `rip clank login`.
-The cookie is saved to a gitignored `.clank-session.json` and reused.
+The cookie is saved under `~/.local/state/ripart/` (or `$XDG_STATE_HOME/ripart/`)
+and reused.
 
 **Setting up the leak.** In clank, open the chat's model settings and add a
 **custom provider** whose base URL is your echo proxy (an OpenAI-compatible
@@ -482,9 +483,9 @@ automatically. Cards land in the same UUID-keyed library
 (`output/cli/library/<id>.png`).
 
 **No login required.** Every request carries an `x-app-id: spicychat` header and
-a stable `x-guest-userid` (a UUID RIPart generates once and persists to a
-gitignored `.spicychat-session.json`). That guest identity is enough to read any
-**public** definition, so extraction works out of the box.
+a stable `x-guest-userid` (a UUID RIPart generates once and persists under
+`~/.local/state/ripart/`, or `$XDG_STATE_HOME/ripart/`). That guest identity is
+enough to read any **public** definition, so extraction works out of the box.
 
 **Gated definitions.** When a creator hides the definition
 (`definition_visible: false`), the API returns only the greeting + public

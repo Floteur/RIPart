@@ -21,6 +21,7 @@ from ...common.avatar import fetch_avatar as _fetch_avatar
 from ...common.creds import CredentialStore
 from ...common.errors import RipError
 from ...common.http import HttpClient
+from ...common.storage import state_path
 
 SAUCEPAN_BASE = "https://saucepan.ai"
 SAUCEPAN_ORIGIN = "https://saucepan.ai"
@@ -28,10 +29,10 @@ SAUCEPAN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 TIMEOUT = 30
 _RETRY_ATTEMPTS = 3
 
-# Token lives at the package root, gitignored (see .gitignore). One line, the
-# raw bearer token; never printed back to the user. Anchored to the package root
-# (two levels up from this provider module) so it stays where it has always been.
-TOKEN_FILE = Path(__file__).resolve().parents[2] / ".saucepan-token"
+# Token is state kept outside the package tree. One line, the raw bearer token;
+# it is never printed back to the user.
+_LEGACY_TOKEN_FILE = Path(__file__).resolve().parents[2] / ".saucepan-token"
+TOKEN_FILE = state_path("saucepan-token")
 
 
 class SaucepanError(RipError):
@@ -47,7 +48,7 @@ _http = HttpClient(
     error_cls=SaucepanError,
     timeout=TIMEOUT,
 )
-_creds = CredentialStore(TOKEN_FILE, empty="")
+_creds = CredentialStore(TOKEN_FILE, empty="", legacy_path=_LEGACY_TOKEN_FILE)
 
 
 # --------------------------------------------------------------------------- #

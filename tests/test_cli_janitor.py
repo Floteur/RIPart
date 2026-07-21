@@ -90,3 +90,24 @@ def test_janitor_lorebook_indexes_all_provider_linked_characters(monkeypatch, tm
     assert index.exists()
     record = tmp_path / "library" / "lorebooks" / "janitor" / "book-42.json"
     assert record.exists()
+
+
+def test_provider_extract_adapter_binds_current_cli_output_directory(monkeypatch, tmp_path):
+    """Provider workflows receive UI services instead of importing the Click module."""
+    captured: dict = {}
+
+    def fake_extract(ui, url, **kwargs):
+        captured["library_dir"] = ui.library_dir
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(cli, "OUT", tmp_path)
+    monkeypatch.setattr(cli.cli_extractors, "saucepan_extract", fake_extract)
+
+    cli._saucepan_extract("companion-42", leak=True, verbose=2)
+
+    assert captured == {
+        "library_dir": tmp_path / "library",
+        "url": "companion-42",
+        "kwargs": {"leak": True, "verbose": 2},
+    }

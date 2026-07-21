@@ -1,8 +1,8 @@
 """clank.world HTTP client: session cookies, headers, URL parsing, avatars.
 
-Auth is the browser's ``next-auth`` session cookie (a JWE), persisted to a
-gitignored ``.clank-session.json`` at the package root and reused by every
-command. Mutations additionally need the CSRF cookie. Built on
+Auth is the browser's ``next-auth`` session cookie (a JWE), persisted in
+RIPart's application-state directory and reused by every command. Mutations
+additionally need the CSRF cookie. Built on
 :mod:`ripart.common.http` (pooled client + retry + tracing) and
 :mod:`ripart.common.creds` (the persisted session with a per-thread override).
 """
@@ -20,6 +20,7 @@ from ...common.avatar import fetch_avatar as _fetch_avatar
 from ...common.creds import CredentialStore
 from ...common.errors import RipError
 from ...common.http import HttpClient
+from ...common.storage import state_path
 
 CLANK_BASE = "https://www.clank.world"
 CLANK_ORIGIN = "https://www.clank.world"
@@ -29,9 +30,10 @@ CLANK_UA = (
 )
 TIMEOUT = 30
 
-# Session cookies live at the package root, gitignored. A small JSON object:
+# Session cookies are stored in RIPart's application-state directory. A small JSON object:
 # {"session_token": "...", "csrf_token": "..."}. Never printed back to the user.
-SESSION_FILE = Path(__file__).resolve().parents[2] / ".clank-session.json"
+_LEGACY_SESSION_FILE = Path(__file__).resolve().parents[2] / ".clank-session.json"
+SESSION_FILE = state_path("clank-session.json")
 
 
 class ClankError(RipError):
@@ -47,7 +49,11 @@ _http = HttpClient(
     timeout=TIMEOUT,
 )
 _creds = CredentialStore(
-    SESSION_FILE, empty={}, loads=json.loads, dumps=json.dumps
+    SESSION_FILE,
+    empty={},
+    loads=json.loads,
+    dumps=json.dumps,
+    legacy_path=_LEGACY_SESSION_FILE,
 )
 
 

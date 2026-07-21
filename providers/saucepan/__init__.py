@@ -5,7 +5,7 @@ is available directly from the authenticated REST API (though it ships shuffled 
 decoy-padded — see :mod:`~ripart.providers.saucepan.fragments`). The gated
 example dialogue / advanced prompt are recovered with a leak
 (:mod:`~ripart.providers.saucepan.leak`): a model dump, or a verbatim echo-proxy
-pull. The bearer token is persisted to a gitignored file at the package root and
+pull. The bearer token is persisted in RIPart's application-state directory and
 reused by every command.
 
 This package re-exports the public surface (and a few internals used by the test

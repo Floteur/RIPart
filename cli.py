@@ -19,6 +19,7 @@ import rich_click as click
 from rich.console import Console
 from rich.table import Table
 
+from . import cli_extractors
 from .common.cards import save_to_library
 from .common.lorebooks import update_lorebook_library
 from .common.text import safe_name, write_json
@@ -120,6 +121,20 @@ def _field(label: str, value: object) -> None:
 
 def _path(label: str, value: object) -> None:
     console.print(f"  [dim]{label}:[/] [cyan]{value}[/]")
+
+
+def _extraction_ui() -> cli_extractors.ExtractionUI:
+    """Bind provider extraction workflows to this command module's UI."""
+    return cli_extractors.ExtractionUI(
+        library_dir=OUT / "library",
+        print=console.print,
+        error=err_console.print,
+        ok=_ok,
+        no=_no,
+        field=_field,
+        path=_path,
+        duration=_fmt_duration,
+    )
 
 
 def _library_has_card(
@@ -1286,163 +1301,6 @@ def saucepan_extract(
     )
 
 
-def _rank_leak_configs(configs: list[dict]) -> list[dict]:
-    """Order provider configs for --leak auto-pick: visible first, real providers
-    before ad-hoc 'custom' ones (which are often half-configured), then by the
-    user's own sort_order."""
-    visible = [c for c in configs if c.get("is_visible")]
-
-    def rank(cfg: dict) -> tuple:
-        is_custom = 1 if str(cfg.get("provider") or "").lower() == "custom" else 0
-        return (is_custom, cfg.get("sort_order") if isinstance(cfg.get("sort_order"), int) else 999)
-
-    return sorted(visible, key=rank)
-
-
-def _saucepan_extract(
-    url: str,
-    *,
-    include_lorebooks: bool = True,
-    leak: bool = False,
-    leak_config: str | None = None,
-    leak_model: str | None = None,
-    leak_mode: str = "user",
-    leak_prompt: str | None = None,
-    leak_system: str | None = None,
-    leak_keep: bool = False,
-    leak_echo: bool = True,
-    verbose: int = 0,
-) -> None:
-    """Shared implementation for [rip saucepan extract] and [rip extract <sp url>]."""
-    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
-    sp.set_trace_level(verbose)
-    if leak and leak_config and leak_model:
-        console.print(
-            "[yellow]![/] both --leak-config and --leak-model given; using --leak-config"
-        )
-        leak_model = None
-    # Resolve the BYOK config (by name or id) up front so we fail fast with a
-    # helpful list rather than mid-extraction.
-    if leak and not leak_model:
-        if leak_config:
-            resolved = sp.resolve_provider_config(leak_config)
-            if not resolved:
-                _no(
-                    f"no provider config matching [bold]{leak_config}[/] - see [bold]rip saucepan providers[/]"
-                )
-                raise SystemExit(1)
-            leak_config = resolved
-        else:
-            configs = _rank_leak_configs(sp.list_provider_configs())
-            if not configs:
-                _no(
-                    "no BYOK provider config for --leak - add one on saucepan.ai, or pass --leak-model"
-                )
-                raise SystemExit(1)
-            leak_config = configs[0].get("config_id")
-            console.print(
-                f"[dim]leak model: {configs[0].get('config_name')} ({configs[0].get('model_id')})[/]"
-            )
-
-    # Optionally set the provider's system prompt for the leak, restoring it after.
-    restore: tuple[str, str | None] | None = None
-    if leak and leak_system:
-        if not leak_config:
-            _no("--leak-system needs a BYOK --leak-config (not --leak-model)")
-            raise SystemExit(1)
-        try:
-            previous = sp.set_provider_prompt(leak_config, leak_system)
-            restore = (leak_config, previous)
-            log("set provider system prompt for leak")
-        except sp.SaucepanError as exc:
-            _no(f"could not set --leak-system: {exc}")
-            raise SystemExit(1)
-
-    started = time.monotonic()
-    try:
-        result = sp.extract_companion(
-            url,
-            include_lorebooks=include_lorebooks,
-            leak=leak,
-            leak_config=leak_config,
-            leak_model=leak_model,
-            leak_mode=leak_mode,
-            leak_prompt=leak_prompt,
-            leak_keep=leak_keep,
-            leak_echo=leak_echo,
-            log=log,
-        )
-    except sp.SaucepanError as exc:
-        _no(str(exc))
-        if exc.status == 401:
-            err_console.print("[dim]run [bold]rip saucepan login[/] to authenticate[/]")
-        raise SystemExit(1)
-    finally:
-        sp.set_trace_level(0)
-        if restore is not None:
-            try:
-                sp.set_provider_prompt(restore[0], restore[1])
-                log("restored provider system prompt")
-            except sp.SaucepanError:
-                err_console.print(
-                    "[yellow]![/] could not restore the provider system prompt — "
-                    f"check config [bold]{leak_config}[/] in Saucepan settings"
-                )
-    elapsed = time.monotonic() - started
-    library_dir = OUT / "library"
-    paths = save_to_library(library_dir, result.get("characterId") or "", result)
-
-    # Persist the raw leaked dump next to the card — the parsed merge is lossy,
-    # so keeping the verbatim text lets you review or hand-fix it.
-    leak_raw = result.get("leakRaw") or ""
-    leak_path = None
-    if leak_raw:
-        leak_path = library_dir / f"{result.get('characterId') or 'card'}.leak.txt"
-        leak_path.write_text(leak_raw, encoding="utf-8")
-
-    _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](saucepan)[/]")
-    _path("card png", paths["png"])
-    if leak_path is not None:
-        _path("raw leak", leak_path)
-    character = result.get("character") or {}
-    diagnostics = result.get("diagnostics") or {}
-    greetings = (1 if character.get("firstMessage") else 0) + len(
-        character.get("alternateGreetings") or []
-    )
-    _field("greetings", greetings)
-    _field(
-        "lorebook entries",
-        f"{diagnostics.get('lorebookEntries', 0)} in {diagnostics.get('lorebooks', 0)} book(s)",
-    )
-    source = character.get("definitionSource")
-    if source == "saucepan-echo":
-        _field(
-            "definition",
-            f"[green]leaked {diagnostics.get('leakChars', 0)} chars verbatim via echo proxy[/]",
-        )
-    elif source == "saucepan-leak":
-        _field(
-            "definition",
-            f"[green]leaked {diagnostics.get('leakChars', 0)} chars via model[/] [dim](lossy)[/]",
-        )
-    elif leak and diagnostics.get("leakError"):
-        _field(
-            "definition",
-            f"[yellow]leak failed: {diagnostics['leakError']} - kept public data[/]",
-        )
-    elif source == "saucepan-partial":
-        _field(
-            "definition",
-            "[yellow]partial - definition gated, body/greetings from public data[/]",
-        )
-    _field("time", _fmt_duration(elapsed))
-
-    if verbose:
-        _field("definition open", diagnostics.get("definitionOpen"))
-        _field("definition sections", diagnostics.get("sections") or [])
-        _field("lorebooks", diagnostics.get("lorebooks", 0))
-        if leak and diagnostics.get("leakError"):
-            _field("leak error", diagnostics["leakError"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1681,86 +1539,6 @@ def clank_extract(
     )
 
 
-def _clank_extract(
-    url: str,
-    *,
-    leak: bool = False,
-    keep_boilerplate: bool = False,
-    trigger_message: str = "hi",
-    with_lorebook: bool = False,
-    max_triggers: int = 8,
-    verbose: int = 0,
-) -> None:
-    """Shared implementation for [rip clank extract] and [rip extract <clank url>]."""
-    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
-    ck.set_trace_level(verbose)
-    started = time.monotonic()
-    try:
-        result = ck.extract_chat(
-            url,
-            leak=leak,
-            keep_boilerplate=keep_boilerplate,
-            trigger_message=trigger_message,
-            with_lorebook=with_lorebook,
-            max_triggers=max_triggers,
-            log=log,
-        )
-    except ck.ClankError as exc:
-        _no(str(exc))
-        if exc.status == 401:
-            err_console.print("[dim]run [bold]rip clank login[/] to authenticate[/]")
-        raise SystemExit(1)
-    finally:
-        ck.set_trace_level(0)
-    elapsed = time.monotonic() - started
-
-    library_dir = OUT / "library"
-    paths = save_to_library(library_dir, result.get("characterId") or "", result)
-
-    leak_raw = result.get("leakRaw") or ""
-    leak_path = None
-    if leak_raw:
-        leak_path = library_dir / f"{result.get('characterId') or 'card'}.leak.txt"
-        leak_path.write_text(leak_raw, encoding="utf-8")
-
-    _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](clank)[/]")
-    _path("card png", paths["png"])
-    if leak_path is not None:
-        _path("raw leak", leak_path)
-
-    character = result.get("character") or {}
-    diagnostics = result.get("diagnostics") or {}
-    source = character.get("definitionSource")
-    if source == "clank-echo-leak":
-        _field(
-            "definition",
-            f"[green]leaked {diagnostics.get('definitionChars', 0)} chars verbatim via echo proxy[/]",
-        )
-    elif diagnostics.get("leakError"):
-        _field("definition", f"[yellow]not leaked: {diagnostics['leakError']}[/]")
-    else:
-        _field(
-            "definition",
-            "[yellow]partial - no echo in chat; configure the proxy + send a message, or use --leak[/]",
-        )
-    greetings = (1 if character.get("firstMessage") else 0) + len(character.get("alternateGreetings") or [])
-    _field("greetings", greetings)
-    _field("scenario", f"{diagnostics.get('scenarioChars', 0)} chars")
-    _field("example dialogue", f"{diagnostics.get('exampleChars', 0)} chars")
-    tags = diagnostics.get("tags") or []
-    if tags:
-        _field("tags", ", ".join(tags))
-    if with_lorebook:
-        if "lorebookEntries" in diagnostics:
-            n = diagnostics["lorebookEntries"]
-            _field(
-                "lorebook",
-                f"[green]{n} entr{'y' if n == 1 else 'ies'} recovered via triggers[/]"
-                if n else "no lorebook entries fired (character may have none)",
-            )
-        elif diagnostics.get("lorebookError"):
-            _field("lorebook", f"[yellow]not run: {diagnostics['lorebookError']}[/]")
-    _field("time", _fmt_duration(elapsed))
 
 
 # --------------------------------------------------------------------------- #
@@ -2042,122 +1820,29 @@ def spicychat_extract(
     )
 
 
-def _spicychat_extract(
-    url: str,
-    *,
-    leak: bool = False,
-    leak_model: str = sc.DEFAULT_LEAK_MODEL,
-    leak_attempts: int = 4,
-    leak_prompt: str | None = None,
-    leak_keep: bool = False,
-    verbose: int = 0,
-) -> None:
-    """Shared impl for [rip spicychat extract] and [rip extract <spicychat url>]."""
-    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
-    sc.set_trace_level(verbose)
-    started = time.monotonic()
-    try:
-        result = sc.extract_character(
-            url,
-            leak=leak,
-            leak_prompt=leak_prompt or sc.DEFAULT_LEAK_PROMPT,
-            leak_model=leak_model,
-            leak_attempts=leak_attempts,
-            leak_keep=leak_keep,
-            log=log,
-        )
-    except sc.SpicyChatError as exc:
-        _no(str(exc))
-        raise SystemExit(1)
-    finally:
-        sc.set_trace_level(0)
-    elapsed = time.monotonic() - started
-
-    library_dir = OUT / "library"
-    paths = save_to_library(library_dir, result.get("characterId") or "", result)
-
-    _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](spicychat)[/]")
-    _path("card png", paths["png"])
-
-    character = result.get("character") or {}
-    diagnostics = result.get("diagnostics") or {}
-    source = character.get("definitionSource")
-    if source == "spicychat-api":
-        _field("definition", f"[green]public — {diagnostics.get('definitionChars', 0)} chars[/]")
-    elif source == "spicychat-leak":
-        _field(
-            "definition",
-            f"[cyan]leaked via model dump — {diagnostics.get('definitionChars', 0)} chars "
-            "(lossy paraphrase)[/]",
-        )
-    else:
-        _field(
-            "definition",
-            "[yellow]gated (definition_visible=false) — partial card (greeting + metadata); "
-            "add --leak to recover[/]",
-        )
-    _field("greeting", f"{diagnostics.get('greetingChars', 0)} chars")
-    _field("scenario", f"{diagnostics.get('scenarioChars', 0)} chars")
-    _field("example dialogue", f"{diagnostics.get('exampleChars', 0)} chars")
-    tags = diagnostics.get("tags") or []
-    if tags:
-        _field("tags", ", ".join(tags))
-    if diagnostics.get("lorebookCount"):
-        _field("lorebooks", f"{diagnostics['lorebookCount']} attached [dim](entries gated)[/]")
-    _field("time", _fmt_duration(elapsed))
 
 
-def _report_open_card(result: dict, *, platform: str, url: str, elapsed: float) -> None:
-    """Shared result printer for the open-archive rippers (chub, tavern)."""
-    library_dir = OUT / "library"
-    paths = save_to_library(library_dir, result.get("characterId") or "card", result)
-
-    _ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim]({platform})[/]")
-    _path("card png", paths["png"])
-
-    diagnostics = result.get("diagnostics") or {}
-    _field("definition", f"[green]public — {diagnostics.get('descriptionChars', 0)} chars[/]")
-    _field("first message", f"{diagnostics.get('firstMessageChars', 0)} chars")
-    _field("example dialogue", f"{diagnostics.get('exampleChars', 0)} chars")
-    if diagnostics.get("alternateGreetings"):
-        _field("alt greetings", diagnostics["alternateGreetings"])
-    if diagnostics.get("lorebookEntries"):
-        _field("lorebook", f"{diagnostics['lorebookEntries']} entries [dim](keys preserved)[/]")
-    tags = diagnostics.get("tags") or []
-    if tags:
-        _field("tags", ", ".join(tags[:8]))
-    _field("time", _fmt_duration(elapsed))
+# Provider extraction implementation and result formatting live in
+# ``cli_extractors``.  Keep these private adapters for root-level URL routing
+# and for the provider Click commands above.
+def _saucepan_extract(url: str, **kwargs: object) -> None:
+    cli_extractors.saucepan_extract(_extraction_ui(), url, **kwargs)
 
 
-def _chub_extract(url: str, *, verbose: int = 0) -> None:
-    """Shared impl for [rip extract <chub url>]."""
-    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
-    cb.set_trace_level(verbose)
-    started = time.monotonic()
-    try:
-        result = cb.extract_character(url, log=log)
-    except cb.ChubError as exc:
-        _no(str(exc))
-        raise SystemExit(1)
-    finally:
-        cb.set_trace_level(0)
-    _report_open_card(result, platform="chub", url=url, elapsed=time.monotonic() - started)
+def _clank_extract(url: str, **kwargs: object) -> None:
+    cli_extractors.clank_extract(_extraction_ui(), url, **kwargs)
 
 
-def _tavern_extract(url: str, *, verbose: int = 0) -> None:
-    """Shared impl for [rip extract <card-file / character-tavern url>]."""
-    log = (lambda m: console.print(f"[dim]  · {m}[/]")) if verbose >= 1 else (lambda m: None)
-    tv.set_trace_level(verbose)
-    started = time.monotonic()
-    try:
-        result = tv.extract_card(url, log=log)
-    except tv.TavernCardError as exc:
-        _no(str(exc))
-        raise SystemExit(1)
-    finally:
-        tv.set_trace_level(0)
-    platform = result.get("diagnostics", {}).get("cardKind") or "card"
-    _report_open_card(result, platform=f"tavern-{platform}", url=url, elapsed=time.monotonic() - started)
+def _spicychat_extract(url: str, **kwargs: object) -> None:
+    cli_extractors.spicychat_extract(_extraction_ui(), url, **kwargs)
+
+
+def _chub_extract(url: str, **kwargs: object) -> None:
+    cli_extractors.chub_extract(_extraction_ui(), url, **kwargs)
+
+
+def _tavern_extract(url: str, **kwargs: object) -> None:
+    cli_extractors.tavern_extract(_extraction_ui(), url, **kwargs)
 
 
 # --------------------------------------------------------------------------- #
