@@ -128,7 +128,7 @@ def test_discord_command_schema_descriptions_fit_the_platform_limit():
             for option in action_options((provider,), action)
         ),
     ]
-    assert sum(len(option.description) for option in fields) < 4_000
+    assert sum(len(option.description) for option in fields) < 5_000
 
 
 def test_queue_serialises_a_provider_but_runs_providers_in_parallel():

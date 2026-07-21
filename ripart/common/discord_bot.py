@@ -25,9 +25,10 @@ from dataclasses import dataclass
 
 import click
 
-from .discord_forum import _load_env
+from .env import load_env as _load_env
 
 _INLINE_OUTPUT_LIMIT = 1_500  # longer results are sent as a file attachment instead
+_DESCRIPTION_CAP = 50  # Discord option description max; keep short for 8 KiB tree limit
 _LOG = logging.getLogger(__name__)
 
 # Keep the Discord command picker aligned with every user-facing RIPart CLI
@@ -155,8 +156,13 @@ def _argument_description(parameter: click.Argument, *, is_extract_uuid: bool) -
     }.get(parameter.name, f"{parameter.name.replace('_', ' ')} input.")
 
 
-def _option_description(flag: str) -> str:
-    """Keep every option discoverable without duplicating lengthy CLI help."""
+def _option_description(parameter: click.Option, flag: str) -> str:
+    help_text = (parameter.help or "").strip()
+    if help_text:
+        if len(help_text) <= _DESCRIPTION_CAP:
+            return help_text
+        cut = help_text.rfind(" ", 0, _DESCRIPTION_CAP - 1)
+        return help_text[:cut].rstrip(",") if cut > 0 else help_text[:_DESCRIPTION_CAP]
     return f"CLI option: {flag}"
 
 
@@ -188,7 +194,7 @@ def action_options(prefix: tuple[str, ...], action: str) -> tuple[ActionOption, 
             ActionOption(
                 name=parameter.name,
                 annotation=_discord_type(parameter),
-                description=_option_description(flag),
+                description=_option_description(parameter, flag),
                 required=parameter.required,
                 positional=False,
                 flag=flag,
@@ -338,13 +344,17 @@ class ExtractionQueue:
         provider: str,
         thunk: Callable[[], JobResult],
         *,
+        timeout: float | None = 600,
         on_queued: Callable[[int], Awaitable[None]] | None = None,
         on_start: Callable[[], Awaitable[None]] | None = None,
+        on_timeout: Callable[[], Awaitable[None]] | None = None,
     ) -> JobResult:
         """Run ``thunk`` in a worker thread, serialised behind ``provider``.
 
         ``on_queued`` is called with this job's 1-based position in the
         provider's line; ``on_start`` fires once it actually begins running.
+        If the job exceeds ``timeout`` seconds, ``on_timeout`` is called
+        (but the thread cannot be force-killed — caller is warned).
         """
         position = self._counts.get(provider, 0) + 1
         self._counts[provider] = position
@@ -354,11 +364,18 @@ class ExtractionQueue:
             async with self._lock(provider):
                 if on_start is not None:
                     await on_start()
-                # ponytail: a worker thread can't be force-killed like a
-                # subprocess, so there's no hard queue timeout — a wedged
-                # provider stalls only its own lane. Provider HTTP/browser
-                # timeouts bound this in practice.
-                return await asyncio.to_thread(thunk)
+                task = asyncio.create_task(asyncio.to_thread(thunk))
+                try:
+                    return await asyncio.wait_for(task, timeout=timeout)
+                except asyncio.TimeoutError:
+                    if on_timeout is not None:
+                        await on_timeout()
+                    _LOG.warning(
+                        "job for provider %s exceeded %ss timeout — "
+                        "the worker thread continues but its result is discarded",
+                        provider, timeout,
+                    )
+                    return JobResult(False, f"Timed out after {timeout}s.")
         finally:
             self._counts[provider] -= 1
 
@@ -513,8 +530,13 @@ def run_discord_bot(*, verbose: int = 0) -> None:
         if interaction.guild_id != guild_id or (
             channel_id is not None and interaction.channel_id != channel_id
         ):
+            hint = ""
+            if channel_id is not None:
+                channel = interaction.guild.get_channel(channel_id)
+                if channel:
+                    hint = f" Use <#{channel_id}>."
             await interaction.response.send_message(
-                "⛔ This command isn't available in this channel.", ephemeral=True
+                f"⛔ This command isn't available in this channel.{hint}", ephemeral=True
             )
             return
         title = f"rip {command_label}"
@@ -573,6 +595,14 @@ def run_discord_bot(*, verbose: int = 0) -> None:
                 asyncio.create_task(refresh_status(), name="ripart-discord-status")
             )
 
+        async def on_timeout() -> None:
+            await interaction.edit_original_response(
+                embed=make_embed(
+                    "⚠ Timed out — the extraction may still be finishing in the background.",
+                    discord.Color.orange(),
+                )
+            )
+
         refresh_tasks: list[asyncio.Task] = []
 
         async def refresh_status() -> None:
@@ -597,7 +627,8 @@ def run_discord_bot(*, verbose: int = 0) -> None:
         try:
             await interaction.response.defer(thinking=True, ephemeral=not is_public)
             result = await queue.run(
-                provider, lambda: _run_command(argv), on_queued=on_queued, on_start=on_start
+                provider, lambda: _run_command(argv),
+                on_queued=on_queued, on_start=on_start, on_timeout=on_timeout,
             )
         except Exception as exc:  # noqa: BLE001 - never let one job crash the gateway
             _LOG.exception("job `%s` crashed", command_label)

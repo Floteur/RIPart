@@ -22,8 +22,8 @@ a rip.
 from __future__ import annotations
 
 import hashlib
-import io
 import json
+import logging
 import os
 import re
 import time
@@ -31,13 +31,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from dotenv import dotenv_values, find_dotenv
 
 from .cards import build_character_book
+from .env import env_paths as _env_paths, load_env as _load_env
 
-# Repository root, used as a reliable fallback when the CLI is launched from
-# elsewhere (for example through an installed console script).
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_LOG = logging.getLogger(__name__)
 
 _API = "https://discord.com/api/v10"
 _UA = "ripart (https://github.com/, forum-archiver)"
@@ -106,42 +104,6 @@ _CONTENT_TAGS: dict[str, str] = {
     "multiple characters": "Multiple",
     "multiple": "Multiple",
 }
-
-
-def _env_paths() -> tuple[Path, ...]:
-    """Return applicable dotenv files, in precedence order.
-
-    A nearby file found from the invocation directory takes precedence over the
-    repository file. Duplicate paths are collapsed when RIPart runs from its
-    checkout root.
-    """
-    paths: list[Path] = []
-    if found := find_dotenv(usecwd=True):
-        paths.append(Path(found))
-    paths.append(_PROJECT_ROOT / ".env")
-    return tuple(dict.fromkeys(path.resolve() for path in paths if path.is_file()))
-
-
-def _load_env() -> None:
-    """Load configuration from nearby and project ``.env`` files once.
-
-    Existing environment variables are never overwritten. This lets deployment
-    secrets override local files while supporting both a caller's directory and
-    the repository checkout.
-    """
-    if os.environ.get("_RIPART_ENV_LOADED"):
-        return
-    os.environ["_RIPART_ENV_LOADED"] = "1"
-    for path in _env_paths():
-        # Some existing RIPart .env files also hold Janitor credentials as
-        # ``user:``/``pass:`` lines. They are not dotenv syntax, so filter them
-        # before handing the standard assignments to python-dotenv.
-        assignments = "\n".join(
-            line for line in path.read_text(encoding="utf-8").splitlines() if "=" in line
-        )
-        for key, value in dotenv_values(stream=io.StringIO(assignments)).items():
-            if key and value is not None:
-                os.environ.setdefault(key, value)
 
 
 def _platform_of(url: str) -> str | None:
@@ -417,6 +379,8 @@ class ForumPublisher:
         files: dict[str, Any] | None = None,
         attempts: int = 4,
     ) -> httpx.Response:
+        import random as _random
+
         for attempt in range(attempts):
             resp = self._client.request(
                 method, path, json=json_body, data=data, files=files
@@ -427,7 +391,12 @@ class ForumPublisher:
                     delay = float(retry_after) if retry_after else 1.0
                 except ValueError:
                     delay = 1.0
-                time.sleep(min(delay + 0.1, 10.0))
+                backoff = min(delay + (2 ** attempt) + _random.uniform(0, 0.5), 30.0)
+                _LOG.warning(
+                    "rate limited (attempt %d/%d), retrying in %.1fs",
+                    attempt + 1, attempts, backoff,
+                )
+                time.sleep(backoff)
                 continue
             return resp
         return resp  # pragma: no cover - loop returns on the last attempt
@@ -519,6 +488,7 @@ class ForumPublisher:
         applied_tags: list[str],
         png_path: Path,
     ) -> dict[str, Any] | None:
+        """Create a forum post with the card PNG and summary embed."""
         payload = {
             "name": title,
             "applied_tags": applied_tags,

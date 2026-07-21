@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from ripart.common import discord_forum
+from ripart.common import discord_forum, env
 from ripart.common.cards import save_to_library
 from ripart.common.discord_forum import (
     ForumPublisher,
@@ -32,7 +32,7 @@ def test_load_env_checks_cwd_and_project_dotenv_files_without_overwriting_env(
         encoding="utf-8",
     )
     monkeypatch.chdir(working_dir)
-    monkeypatch.setattr(discord_forum, "_PROJECT_ROOT", project_dir)
+    monkeypatch.setattr(env, "_PROJECT_ROOT", project_dir)
     monkeypatch.delenv("_RIPART_ENV_LOADED", raising=False)
     monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
     monkeypatch.delenv("DISCORD_GUILD_ID", raising=False)
