@@ -1881,30 +1881,13 @@ def completion(shell: str | None) -> None:
     "--reload",
     "reload_",
     is_flag=True,
-    help="Dev: hot-patch code changes into the live bot without dropping running jobs.",
+    help="Dev: watch files and hot-reload modules without dropping the Discord connection.",
 )
 def discord_bot(verbose: int, reload_: bool) -> None:
     """Serve the one-at-a-time `/rip` Discord command gateway."""
     from .common.discord_bot import run_discord_bot
 
-    if reload_:
-        try:
-            import jurigged
-        except ImportError:
-            raise SystemExit("--reload needs jurigged — install it with `uv sync --extra discord`")
-        # Hot-patch changed functions straight into the running interpreter
-        # instead of restarting, so extractions already in flight keep going.
-        # Caveat: structural changes (new/removed slash commands, changed command
-        # schemas, class layout) still need a manual restart — the command tree
-        # is built and synced once at startup and jurigged only patches function
-        # bodies.
-        jurigged.watch(str(Path(__file__).resolve().parent))
-        console.print(
-            "[dim]hot-reload on (jurigged) — saved edits patch the live bot; "
-            "restart for new/renamed commands[/]"
-        )
-
-    run_discord_bot(verbose=verbose)
+    run_discord_bot(verbose=verbose, reload=reload_)
 
 
 if __name__ == "__main__":

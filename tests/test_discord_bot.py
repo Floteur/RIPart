@@ -194,10 +194,10 @@ def test_queue_reports_position_within_a_provider_lane():
 
 def test_queue_allows_one_extraction_reservation_per_user():
     queue = ExtractionQueue()
-    assert queue.reserve(7) is True
-    assert queue.reserve(7) is False  # second concurrent reservation is rejected
+    assert queue.reserve(7, "janitor extract", "janitor") is True
+    assert queue.reserve(7, "another command", "janitor") is False
     queue.release(7)
-    assert queue.reserve(7) is True  # freed once the first finishes
+    assert queue.reserve(7, "janitor extract", "janitor") is True
 
 
 def test_extract_urls_route_to_the_matching_provider_lane():
