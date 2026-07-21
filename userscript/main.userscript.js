@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Datacat Bulk JanitorAI Character Retriever
 // @namespace    https://greasyfork.org/users/1622561-flonz
-// @version      1.3.5
+// @version      1.5.0
 // @description  Collect character UUIDs from JanitorAI pages and bulk-retrieve them through Datacat with retries, persistence, and result export.
 // @author       Flo
 // @license      MIT
@@ -9,7 +9,12 @@
 // @match        https://janitorai.com/*
 // @match        https://www.janitorai.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=datacat.run
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_addValueChangeListener
+// @grant        unsafeWindow
 // @run-at       document-start
 // @downloadURL  https://update.greasyfork.org/scripts/586720/Datacat%20Bulk%20JanitorAI%20Character%20Retriever.user.js
 // @updateURL    https://update.greasyfork.org/scripts/586720/Datacat%20Bulk%20JanitorAI%20Character%20Retriever.meta.js
@@ -18,16 +23,21 @@
 (function () {
     "use strict";
 
+    // GM values are shared by every tab running this userscript, even when the
+    // tabs are on different origins. Keep page hooks on unsafeWindow: adding a
+    // GM grant otherwise moves Tampermonkey code into its isolated sandbox.
+    const pageWindow = unsafeWindow;
+
     if (
-        window.__datacatJanitorToolsLoaded ||
-        window.__datacatBulkRetrieverLoaded
+        pageWindow.__datacatJanitorToolsLoaded ||
+        pageWindow.__datacatBulkRetrieverLoaded
     ) {
         return;
     }
-    window.__datacatJanitorToolsLoaded = true;
-    window.__datacatBulkRetrieverLoaded = true;
+    pageWindow.__datacatJanitorToolsLoaded = true;
+    pageWindow.__datacatBulkRetrieverLoaded = true;
 
-    const SCRIPT_VERSION = "1.3.4";
+    const SCRIPT_VERSION = "1.5.0";
     const UUID_PATTERN =
         /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     const JANITOR_COLLECTOR_STORAGE_KEY = "datacat_janitor_uuid_collector_v1";
@@ -35,14 +45,123 @@
         "https://janitorai.com",
         "https://www.janitorai.com"
     ]);
+    const SHARED_KEY_PREFIX = "datacat_bulk_retriever_shared_v1:";
+    const TAB_ID = `${Date.now().toString(36)}-${crypto.getRandomValues(new Uint32Array(1))[0].toString(36)}`;
+    const TAB_TTL_MS = 45_000;
+    const WORKER_LEASE_MS = 15_000;
+    const WORKER_HEARTBEAT_MS = 5_000;
+    const tabKey = `${SHARED_KEY_PREFIX}tab:${TAB_ID}`;
+    const tabsRevisionKey = `${SHARED_KEY_PREFIX}tabs-revision`;
+    const janitorRevisionKey = `${SHARED_KEY_PREFIX}janitor-revision`;
+    const workerLeaseKey = `${SHARED_KEY_PREFIX}worker-lease`;
+    const sharedJobKey = `${SHARED_KEY_PREFIX}job`;
+    const datacatInputKey = `${SHARED_KEY_PREFIX}datacat-input`;
+    let tabRole = "unknown";
+    let workerHeartbeatId = null;
+
+    function touchTab(extra = {}) {
+        const previous = GM_getValue(tabKey, {});
+        GM_setValue(tabKey, {
+            ...previous,
+            id: TAB_ID,
+            role: tabRole,
+            origin: location.origin,
+            href: location.href,
+            seenAt: Date.now(),
+            ...extra
+        });
+        GM_setValue(tabsRevisionKey, { id: TAB_ID, at: Date.now() });
+    }
+
+    function activeJanitorIds() {
+        const now = Date.now();
+        const ids = new Set();
+        for (const key of GM_listValues()) {
+            if (!key.startsWith(`${SHARED_KEY_PREFIX}tab:`)) continue;
+            const tab = GM_getValue(key, null);
+            if (
+                tab?.role !== "janitor" ||
+                !Array.isArray(tab.ids) ||
+                !Number.isFinite(tab.seenAt) ||
+                now - tab.seenAt > TAB_TTL_MS
+            ) continue;
+            for (const id of tab.ids) if (typeof id === "string") ids.add(id);
+        }
+        return [...ids];
+    }
+
+    function activeTabCount(role) {
+        const now = Date.now();
+        let count = 0;
+        for (const key of GM_listValues()) {
+            if (!key.startsWith(`${SHARED_KEY_PREFIX}tab:`)) continue;
+            const tab = GM_getValue(key, null);
+            if (
+                tab?.role === role &&
+                Number.isFinite(tab.seenAt) &&
+                now - tab.seenAt <= TAB_TTL_MS
+            ) count++;
+        }
+        return count;
+    }
+
+    function publishJanitorIds(ids) {
+        touchTab({ ids: [...ids] });
+        GM_setValue(janitorRevisionKey, { id: TAB_ID, at: Date.now() });
+    }
+
+    function getWorkerLease() {
+        return GM_getValue(workerLeaseKey, null);
+    }
+
+    async function acquireWorkerLease() {
+        const current = getWorkerLease();
+        if (current?.tabId !== TAB_ID && current?.expiresAt > Date.now()) {
+            return false;
+        }
+        GM_setValue(workerLeaseKey, {
+            tabId: TAB_ID,
+            expiresAt: Date.now() + WORKER_LEASE_MS
+        });
+        // Let competing tabs write their candidate lease, then verify ours won.
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        return getWorkerLease()?.tabId === TAB_ID;
+    }
+
+    function renewWorkerLease() {
+        if (getWorkerLease()?.tabId !== TAB_ID) return false;
+        GM_setValue(workerLeaseKey, {
+            tabId: TAB_ID,
+            expiresAt: Date.now() + WORKER_LEASE_MS
+        });
+        return true;
+    }
+
+    function releaseWorkerLease() {
+        if (getWorkerLease()?.tabId === TAB_ID) GM_deleteValue(workerLeaseKey);
+        if (workerHeartbeatId !== null) clearInterval(workerHeartbeatId);
+        workerHeartbeatId = null;
+    }
+
+    function startWorkerHeartbeat() {
+        workerHeartbeatId = setInterval(() => {
+            if (!renewWorkerLease()) releaseWorkerLease();
+        }, WORKER_HEARTBEAT_MS);
+    }
 
     const hostname = location.hostname.toLowerCase();
     if (hostname === "janitorai.com" || hostname === "www.janitorai.com") {
+        tabRole = "janitor";
+        touchTab({ ids: [] });
+        setInterval(() => touchTab(), WORKER_HEARTBEAT_MS);
         mountJanitorCollector();
         return;
     }
 
     if (hostname !== "datacat.run") return;
+    tabRole = "datacat";
+    touchTab();
+    setInterval(() => touchTab(), WORKER_HEARTBEAT_MS);
 
     function mountJanitorCollector() {
         const collectedIds = new Set();
@@ -162,6 +281,7 @@
                 panel.style.top = `${Math.max(0, savedPosition.top)}px`;
             }
             refreshOutput();
+            publishJanitorIds(collectedIds);
             scanPage();
         };
 
@@ -224,7 +344,23 @@
                 JANITOR_COLLECTOR_STORAGE_KEY,
                 JSON.stringify({ ids: [...collectedIds], position: savedPosition })
             );
+            publishJanitorIds(collectedIds);
         }
+
+        GM_addValueChangeListener(janitorRevisionKey, (_key, _old, _value, remote) => {
+            if (!remote) return;
+            let changed = false;
+            for (const id of activeJanitorIds()) {
+                if (!collectedIds.has(id)) {
+                    collectedIds.add(id);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                persistCollectorState();
+                refreshOutput();
+            }
+        });
 
         function scanPage({ refreshWhenUnchanged = false } = {}) {
             const before = collectedIds.size;
@@ -288,11 +424,21 @@
             const ids = [...collectedIds];
             if (!ids.length) return;
 
+            // Existing Datacat instances receive these IDs through GM storage.
+            // Browser tabs cannot be focused unless this page owns their Window
+            // reference, so do not create a second retrieval panel needlessly.
+            publishJanitorIds(ids);
+            const openDatacatTabs = activeTabCount("datacat");
+            if (openDatacatTabs) {
+                status.textContent = `Sent ${ids.length} ID${ids.length === 1 ? "" : "s"} to ${openDatacatTabs} active Datacat tab${openDatacatTabs === 1 ? "" : "s"}.`;
+                return;
+            }
+
             const importUrl = new URL("https://datacat.run/");
             importUrl.hash = new URLSearchParams({
                 janitorIds: ids.join(",")
             }).toString();
-            const target = window.open(
+            const target = pageWindow.open(
                 importUrl.href,
                 "datacat-janitor-import"
             );
@@ -300,6 +446,7 @@
                 status.textContent = "Could not open Datacat. Allow pop-ups, then try again.";
                 return;
             }
+            target.focus?.();
             status.textContent = `Opened Datacat with ${ids.length} ID${ids.length === 1 ? "" : "s"} ready to import.`;
         }
 
@@ -378,9 +525,9 @@
 
     const $ = (selector, root = document) => root.querySelector(selector);
 
-    const originalFetch = window.fetch.bind(window);
+    const originalFetch = pageWindow.fetch.bind(pageWindow);
 
-    window.fetch = async function (...args) {
+    pageWindow.fetch = async function (...args) {
         const request = args[0];
         const options = args[1] || {};
         const url =
@@ -393,7 +540,7 @@
                 .clone()
                 .json()
                 .then((data) => {
-                    window.dispatchEvent(
+                    pageWindow.dispatchEvent(
                         new CustomEvent("datacat:snapshot", { detail: data })
                     );
                 })
@@ -408,7 +555,7 @@
         return response;
     };
 
-    window.addEventListener("datacat:snapshot", (event) => {
+    pageWindow.addEventListener("datacat:snapshot", (event) => {
         latestQueueCapacity =
             event.detail?.extraction?.queueCapacity ?? null;
 
@@ -481,21 +628,11 @@
     }
 
     function loadJob() {
-        try {
-            return JSON.parse(
-                localStorage.getItem(CONFIG.jobStorageKey) || "null"
-            );
-        } catch {
-            return null;
-        }
+        return GM_getValue(sharedJobKey, null);
     }
 
     function saveJob(job) {
-        if (!job) {
-            localStorage.removeItem(CONFIG.jobStorageKey);
-            return;
-        }
-        localStorage.setItem(CONFIG.jobStorageKey, JSON.stringify(job));
+        GM_setValue(sharedJobKey, job);
     }
 
     function persistJobProgress() {
@@ -504,6 +641,7 @@
             return;
         }
         saveJob({
+            workerTabId: TAB_ID,
             pendingIds: state.pendingIds,
             currentIndex: state.currentIndex,
             results: state.results,
@@ -1173,7 +1311,7 @@
         queueCount: $("#datacat-queue-count", panel)
     };
 
-    window.addEventListener("message", (event) => {
+    pageWindow.addEventListener("message", (event) => {
         if (
             !JANITOR_ORIGINS.has(event.origin) ||
             event.data?.type !== "datacat:janitor-import" ||
@@ -1278,6 +1416,53 @@
         return { count: imported.length, total: ids.length };
     }
 
+    function syncJanitorIdsIntoInput() {
+        const imported = activeJanitorIds();
+        if (!imported.length) return;
+
+        if (state.running) {
+            const have = new Set(state.pendingIds);
+            const added = imported.filter((id) => !have.has(id));
+            if (!added.length) return;
+            state.pendingIds.push(...added);
+            elements.input.value = state.pendingIds.join("\n");
+            updateCount();
+            updateProgress(state.results.length, state.pendingIds.length);
+            persistJobProgress();
+            state.enqueue?.();
+            updateStatus(
+                `Queued ${added.length} more ID${added.length === 1 ? "" : "s"} into the running job.`
+            );
+            return;
+        }
+
+        const existing = parseCharacterIds(elements.input.value).ids;
+        const ids = [...new Set([...existing, ...imported])];
+        if (ids.length === existing.length) return;
+        elements.input.value = ids.join("\n");
+        updateCount();
+        updateStatus(
+            `Synced ${imported.length} ID${imported.length === 1 ? "" : "s"} from active Janitor tab${imported.length === 1 ? "" : "s"}.`
+        );
+    }
+
+    function syncSharedJob(job) {
+        if (state.running || !job || !Array.isArray(job.pendingIds)) return;
+        state.pendingIds = [...job.pendingIds];
+        state.currentIndex = Number.isFinite(job.currentIndex) ? job.currentIndex : 0;
+        state.results = Array.isArray(job.results) ? [...job.results] : [];
+        elements.input.value = state.pendingIds.join("\n");
+        applyJobOptions(job.options);
+        updateCount();
+        updateProgress(state.results.length, state.pendingIds.length);
+        updateStats();
+        if (state.currentIndex < state.pendingIds.length) {
+            updateStatus(
+                `Another Datacat tab is processing ${state.currentIndex}/${state.pendingIds.length}.`
+            );
+        }
+    }
+
     function importJanitorIdsFromHash() {
         const params = new URLSearchParams(location.hash.slice(1));
         const encodedIds = params.get("janitorIds");
@@ -1354,16 +1539,30 @@
         updateResultActions();
     }
 
-    async function processIds(ids, { resumeFrom = 0, priorResults = [] } = {}) {
+    async function processIds(sourceIds, { resumeFrom = 0, priorResults = [] } = {}) {
+        if (!(await acquireWorkerLease())) {
+            const lease = getWorkerLease();
+            updateStatus(
+                lease?.expiresAt > Date.now()
+                    ? "Another Datacat tab is already retrieving this shared queue."
+                    : "Could not acquire the shared retrieval worker; try again."
+            );
+            return;
+        }
+        startWorkerHeartbeat();
         const options = readOptions();
 
         state.running = true;
         state.paused = false;
         state.stopping = false;
         state.results = [...priorResults];
-        state.pendingIds = [...ids];
+        state.pendingIds = [...sourceIds];
+        // Live queue: pushing to state.pendingIds (e.g. Janitor sends mid-run)
+        // extends this run because the loop and existence checks read it directly.
+        const ids = state.pendingIds;
         state.currentIndex = resumeFrom;
         state.startedAtMs = Date.now();
+        persistJobProgress();
 
         if (resumeFrom === 0) {
             elements.log.textContent = "";
@@ -1457,11 +1656,15 @@
             }
         };
 
+        state.enqueue = fillExistenceCheckQueue;
         fillExistenceCheckQueue();
 
         try {
             for (let index = resumeFrom; index < ids.length; index++) {
                 await waitWhilePaused();
+                if (!renewWorkerLease()) {
+                    throw new Error("Retrieval worker lease was taken by another tab");
+                }
                 if (state.stopping) throw new Error("Stopped by user");
 
                 const id = ids[index];
@@ -1615,6 +1818,8 @@
             refreshQueueWithoutKnownExisting();
             state.sleepCancel = null;
             state.startedAtMs = null;
+            state.enqueue = null;
+            releaseWorkerLease();
             setRunningUi(false);
             elements.pause.textContent = "Pause";
             updateStats();
@@ -1724,8 +1929,8 @@
 
         const onMove = (event) => {
             if (!drag) return;
-            const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
-            const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+            const maxLeft = Math.max(0, pageWindow.innerWidth - panel.offsetWidth);
+            const maxTop = Math.max(0, pageWindow.innerHeight - panel.offsetHeight);
             const left = Math.min(
                 maxLeft,
                 Math.max(0, event.clientX - drag.offsetX)
@@ -1767,7 +1972,24 @@
         header.addEventListener("pointercancel", onUp);
     }
 
-    elements.input.addEventListener("input", updateCount);
+    // Mirror the raw textarea across datacat tabs. Full-text sync means append
+    // and remove both propagate for free — no per-op command protocol needed.
+    // ponytail: last-writer-wins, two people typing at once can clobber; add a
+    // per-line merge only if concurrent editing becomes a real workflow.
+    let inputSyncTimer = null;
+    elements.input.addEventListener("input", () => {
+        updateCount();
+        clearTimeout(inputSyncTimer);
+        inputSyncTimer = setTimeout(() => {
+            GM_setValue(datacatInputKey, elements.input.value);
+        }, CONFIG.saveDebounceMs);
+    });
+    GM_addValueChangeListener(datacatInputKey, (_key, _old, value, remote) => {
+        if (!remote || state.running) return;
+        if (typeof value !== "string" || value === elements.input.value) return;
+        elements.input.value = value;
+        updateCount();
+    });
 
     for (const element of [
         elements.delay,
@@ -1882,20 +2104,37 @@
         }
     });
 
-    window.addEventListener("beforeunload", (event) => {
+    pageWindow.addEventListener("beforeunload", (event) => {
         if (existingCacheSaveTimer !== null) {
             clearTimeout(existingCacheSaveTimer);
             saveExistingIdCache();
         }
         if (!state.running) return;
         persistJobProgress();
+        releaseWorkerLease();
         event.preventDefault();
         event.returnValue = "";
     });
 
     applySavedSettings();
     importJanitorIdsFromHash();
-    window.addEventListener("hashchange", importJanitorIdsFromHash);
+    syncJanitorIdsIntoInput();
+
+    GM_addValueChangeListener(janitorRevisionKey, (_key, _old, _value, remote) => {
+        if (remote) syncJanitorIdsIntoInput();
+    });
+    GM_addValueChangeListener(sharedJobKey, (_key, _old, job, remote) => {
+        if (remote) syncSharedJob(job);
+    });
+    GM_addValueChangeListener(workerLeaseKey, (_key, _old, lease, remote) => {
+        if (remote && state.running && lease?.tabId && lease.tabId !== TAB_ID) {
+            updateStatus("Another tab took the retrieval worker; stopping this tab.");
+            stopImmediately();
+        }
+    });
+    syncSharedJob(loadJob());
+
+    pageWindow.addEventListener("hashchange", importJanitorIdsFromHash);
     enableDragging(panel, elements.header, (rect) => {
         saveSettings({
             left: Math.round(rect.left),
