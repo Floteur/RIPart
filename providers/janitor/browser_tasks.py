@@ -102,6 +102,18 @@ BACKGROUND_ARGS = [
     "--disable-backgrounding-occluded-windows",
 ]
 
+# Every task shares this exact @browser config; `browser()` is a pure factory so
+# the returned decorator is safe to reuse across all of them.
+_task = browser(
+    profile=PROFILE,
+    headless=False,
+    output=None,
+    raise_exception=True,
+    close_on_crash=True,
+    create_error_logs=False,
+    add_arguments=BACKGROUND_ARGS,
+)
+
 
 # Shared in-page JS: locate the Supabase access token from cookies/localStorage.
 # Used by both the single and parallel authenticated-fetch helpers.
@@ -1108,10 +1120,11 @@ class GenerateAlphaError(RuntimeError):
         super().__init__(f"generateAlpha failed: HTTP {status} {(body or '')[:300]}")
 
 
-def _call_generate_alpha(
+def _post_generate_alpha(
     driver, body: dict[str, Any], chat_id: str | int
 ) -> dict[str, Any]:
-    result = _authed_fetch(
+    """POST to ``/generateAlpha`` and return the raw ``{status, body}`` result."""
+    return _authed_fetch(
         driver,
         f"{ORIGIN}/generateAlpha",
         {
@@ -1124,6 +1137,12 @@ def _call_generate_alpha(
             "body": json.dumps(body),
         },
     )
+
+
+def _call_generate_alpha(
+    driver, body: dict[str, Any], chat_id: str | int
+) -> dict[str, Any]:
+    result = _post_generate_alpha(driver, body, chat_id)
     if result["status"] >= 400:
         raise GenerateAlphaError(int(result["status"]), result.get("body") or "")
     payload = _parse_generate_alpha_body(result.get("body") or "")
@@ -1134,15 +1153,7 @@ def _call_generate_alpha(
     return payload
 
 
-@browser(
-    profile=PROFILE,
-    headless=False,
-    output=None,
-    raise_exception=True,
-    close_on_crash=True,
-    create_error_logs=False,
-    add_arguments=BACKGROUND_ARGS,
-)
+@_task
 def status_task(driver, _data):
     logged_in = _open_authed_context(driver)
     if logged_in:
@@ -1150,15 +1161,7 @@ def status_task(driver, _data):
     return {"loggedIn": logged_in}
 
 
-@browser(
-    profile=PROFILE,
-    headless=False,
-    output=None,
-    raise_exception=True,
-    close_on_crash=True,
-    create_error_logs=False,
-    add_arguments=BACKGROUND_ARGS,
-)
+@_task
 def login_task(driver, data):
     timeout = int((data or {}).get("timeout") or 180)
     driver.get(f"{ORIGIN}/login")
@@ -1175,15 +1178,7 @@ def login_task(driver, data):
     return {"loggedIn": False}
 
 
-@browser(
-    profile=PROFILE,
-    headless=False,
-    output=None,
-    raise_exception=True,
-    close_on_crash=True,
-    create_error_logs=False,
-    add_arguments=BACKGROUND_ARGS,
-)
+@_task
 def import_session_task(driver, data):
     session_path = (data or {}).get("session_path")
     if session_path:
@@ -1236,15 +1231,7 @@ def import_session_task(driver, data):
     }
 
 
-@browser(
-    profile=PROFILE,
-    headless=False,
-    output=None,
-    raise_exception=True,
-    close_on_crash=True,
-    create_error_logs=False,
-    add_arguments=BACKGROUND_ARGS,
-)
+@_task
 def inspect_task(driver, data):
     character_id = parse_character_id(data["url"])
     char_url = (
@@ -1253,7 +1240,7 @@ def inspect_task(driver, data):
         else f"{ORIGIN}/characters/{character_id}"
     )
     if not _open_authed_context(driver):
-        raise RuntimeError("Not logged into JanitorAI. Run `uv run jar login` first.")
+        raise RuntimeError("Not logged into JanitorAI. Run `uv run rip janitor login` first.")
     _export_session(driver)
     meta = _fetch_json(driver, f"{ORIGIN}/hampter/characters/{character_id}")
     public_lorebooks = _fetch_public_lorebooks(driver, meta)
@@ -1270,15 +1257,7 @@ def inspect_task(driver, data):
     }
 
 
-@browser(
-    profile=PROFILE,
-    headless=False,
-    output=None,
-    raise_exception=True,
-    close_on_crash=True,
-    create_error_logs=False,
-    add_arguments=BACKGROUND_ARGS,
-)
+@_task
 def lorebook_task(driver, data):
     """Fetch one lorebook and its provider-supplied character attachment index."""
     lorebook_id = str((data or {}).get("lorebook_id") or "").strip()
@@ -1446,19 +1425,7 @@ def _leak_definition_via_janitor(
         pacer.wait()
         clog(f"leak pass {attempt + 1}/{passes} request: {_trace_preview(body)}", level=3)
         started = time.monotonic()
-        result = _authed_fetch(
-            driver,
-            f"{ORIGIN}/generateAlpha",
-            {
-                "method": "POST",
-                "headers": {
-                    "accept": "text/event-stream",
-                    "content-type": "application/json",
-                    "referer": f"{ORIGIN}/chats/{chat_id}",
-                },
-                "body": json.dumps(body),
-            },
-        )
+        result = _post_generate_alpha(driver, body, chat_id)
         elapsed_ms = (time.monotonic() - started) * 1000
         status = int(result.get("status") or 0)
         clog(
@@ -1901,15 +1868,7 @@ def _extract_character(
             _delete_chat(driver, chat_id)
 
 
-@browser(
-    profile=PROFILE,
-    headless=False,
-    output=None,
-    raise_exception=True,
-    close_on_crash=True,
-    create_error_logs=False,
-    add_arguments=BACKGROUND_ARGS,
-)
+@_task
 def extract_task(driver, data):
     """Rip a character's card + lorebook by calling ``/generateAlpha`` directly.
 
@@ -1932,7 +1891,7 @@ def extract_task(driver, data):
 
     _extract_log(f"extracting {char_url}", verbose=verbose)
     if not _open_authed_context(driver):
-        raise RuntimeError("Not logged into JanitorAI. Run `uv run jar login` first.")
+        raise RuntimeError("Not logged into JanitorAI. Run `uv run rip janitor login` first.")
     _export_session(driver)
 
     # Fetch profile + meta once; the character's allow_proxy decides which mode
@@ -1994,15 +1953,7 @@ def extract_task(driver, data):
                 )
 
 
-@browser(
-    profile=PROFILE,
-    headless=False,
-    output=None,
-    raise_exception=True,
-    close_on_crash=True,
-    create_error_logs=False,
-    add_arguments=BACKGROUND_ARGS,
-)
+@_task
 def recent_task(driver, data):
     """List the most-recent characters, optionally full-extracting each.
 
@@ -2014,7 +1965,7 @@ def recent_task(driver, data):
     mode = "sfw" if data.get("sfw") else "all"
 
     if not _open_authed_context(driver):
-        raise RuntimeError("Not logged into JanitorAI. Run `uv run jar login` first.")
+        raise RuntimeError("Not logged into JanitorAI. Run `uv run rip janitor login` first.")
     _export_session(driver)
 
     cards = _fetch_recent(driver, limit, mode)
