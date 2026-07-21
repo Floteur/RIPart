@@ -100,6 +100,7 @@ def test_discord_actions_cover_the_public_cli_tree():
         "clank",
         "spicychat",
         "discord-bot",
+        "completion",  # shell-completion setup is local-CLI only
     }
     for provider, actions in _PROVIDER_ACTIONS.items():
         assert set(actions) == set(main.commands[provider].commands)

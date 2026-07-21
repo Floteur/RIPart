@@ -35,7 +35,7 @@ _LOG = logging.getLogger(__name__)
 # Discord shows the same input names, types, and choices as the CLI.
 _ROOT_ACTIONS: dict[str, str] = {
     "extract": "Extract one character or supported card URL.",
-    "completion": "Print local shell-completion instructions.",
+    "status": "Show the auth state of every provider and the library.",
 }
 _PROVIDER_ACTIONS: dict[str, dict[str, str]] = {
     "janitor": {
@@ -324,6 +324,13 @@ class ExtractionQueue:
     def release(self, user_id: int) -> None:
         self._active_users.discard(user_id)
 
+    def snapshot(self) -> dict[str, object]:
+        """Best-effort queue state for status reporting (no locking)."""
+        return {
+            "in_flight": len(self._active_users),
+            "busy_lanes": sorted(p for p, n in self._counts.items() if n > 0),
+        }
+
     def _lock(self, provider: str) -> asyncio.Lock:
         lock = self._locks.get(provider)
         if lock is None:
@@ -358,6 +365,18 @@ class ExtractionQueue:
                 return await asyncio.to_thread(thunk)
         finally:
             self._counts[provider] -= 1
+
+
+def _fmt_uptime(seconds: float) -> str:
+    s = int(seconds)
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    parts = [f"{d}d" for _ in (1,) if d]
+    parts += [f"{h}h" for _ in (1,) if h]
+    parts += [f"{m}m" for _ in (1,) if m]
+    parts.append(f"{s}s")
+    return " ".join(parts)
 
 
 def _env_int(name: str, *, required: bool = False) -> int | None:
@@ -411,7 +430,9 @@ def _configure_logging(verbose: int) -> None:
     so a normally-started bot is no longer silent. ``-v`` adds our own DEBUG
     detail; ``-vv`` also unmutes discord.py's client logger. discord.py's HTTP
     and gateway loggers include full API payloads (account metadata, interaction
-    contents), so they stay at WARNING at every verbosity.
+    contents), so they stay at WARNING at every verbosity. The webhook logger is
+    pinned too: its DEBUG lines print the interaction-token-bearing callback URL
+    (a secret) on every message edit, including the 3s elapsed-timer refresh.
     """
     logging.basicConfig(
         level=logging.DEBUG if verbose > 1 else logging.INFO,
@@ -422,6 +443,7 @@ def _configure_logging(verbose: int) -> None:
     logging.getLogger("discord").setLevel(logging.DEBUG if verbose > 1 else logging.INFO)
     logging.getLogger("discord.http").setLevel(logging.WARNING)
     logging.getLogger("discord.gateway").setLevel(logging.WARNING)
+    logging.getLogger("discord.webhook").setLevel(logging.WARNING)
 
 
 def run_discord_bot(*, verbose: int = 0) -> None:
@@ -446,6 +468,7 @@ def run_discord_bot(*, verbose: int = 0) -> None:
     _install_console_proxies()
 
     queue = ExtractionQueue()
+    bot_started = time.monotonic()
     guild = discord.Object(id=guild_id)
 
     class RipDiscordClient(discord.Client):
@@ -458,11 +481,18 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             self.tree = app_commands.CommandTree(self)
 
         async def setup_hook(self) -> None:
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
+            # We only ever register guild-scoped commands. A guild sync replaces
+            # that guild's set wholesale (so removed/renamed commands vanish),
+            # but it can't touch commands an older version may have left in the
+            # global scope — those keep showing up as stale duplicates. So clear
+            # the global scope and push it empty, then overwrite this guild with
+            # exactly the current tree.
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+            synced = await self.tree.sync(guild=guild)
             _LOG.info(
-                "gateway ready as %s — guild %s, channel %s, %d admin(s)",
-                self.user, guild_id, channel_id or "any", len(admin_ids),
+                "gateway ready as %s — guild %s, channel %s, %d admin(s); %d command(s) synced",
+                self.user, guild_id, channel_id or "any", len(admin_ids), len(synced),
             )
 
     client = RipDiscordClient()
@@ -485,8 +515,10 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             return
         title = f"rip {command_label}"
         user_id = interaction.user.id
-        # One extraction per person; quick read-only commands are exempt.
-        if is_extraction and not queue.reserve(user_id):
+        # One extraction per person; quick read-only commands are exempt, and
+        # admins may queue as many as they like.
+        limited = is_extraction and user_id not in admin_ids
+        if limited and not queue.reserve(user_id):
             await interaction.response.send_message(
                 embed=_embed(
                     title,
@@ -498,9 +530,22 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             )
             return
 
-        # The public status never shows CLI output or the argument values (which
-        # may carry secrets, e.g. a login password); only the requester sees the
-        # captured output, in the ephemeral follow-up below.
+        # Extractions post public progress so the guild can see lane activity;
+        # personal/read-only commands stay fully ephemeral to avoid channel
+        # noise. Either way the captured CLI output (which may echo secrets, e.g.
+        # a login password) is only ever shown to the requester.
+        is_public = is_extraction
+
+        def make_embed(description: str, color, fields=()):
+            embed = _embed(title, description, color, fields)
+            if is_public:
+                embed.set_author(
+                    name=interaction.user.display_name,
+                    icon_url=interaction.user.display_avatar.url,
+                )
+                embed.set_footer(text=f"lane: {provider}")
+            return embed
+
         started_at: float | None = None
         finished = asyncio.Event()
 
@@ -510,7 +555,7 @@ def run_discord_bot(*, verbose: int = 0) -> None:
                 else f"Queued — position {position} in the **{provider}** lane."
             )
             await interaction.edit_original_response(
-                embed=_embed(title, f"⌛ {note}", discord.Color.blurple())
+                embed=make_embed(f"⌛ {note}", discord.Color.blurple())
             )
 
         async def on_start() -> None:
@@ -518,7 +563,7 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             started_at = time.monotonic()
             finished.clear()
             await interaction.edit_original_response(
-                embed=_embed(title, "▶ Running", discord.Color.gold())
+                embed=make_embed("▶ Running", discord.Color.gold())
             )
             refresh_tasks.append(
                 asyncio.create_task(refresh_status(), name="ripart-discord-status")
@@ -537,7 +582,7 @@ def run_discord_bot(*, verbose: int = 0) -> None:
                 elapsed = int(time.monotonic() - started_at) if started_at else 0
                 with contextlib.suppress(Exception):  # UI edits never affect the job
                     await interaction.edit_original_response(
-                        embed=_embed(title, "▶ Running", discord.Color.gold(), [("Elapsed", f"{elapsed}s")])
+                        embed=make_embed("▶ Running", discord.Color.gold(), [("Elapsed", f"{elapsed}s")])
                     )
 
         _LOG.info(
@@ -546,7 +591,7 @@ def run_discord_bot(*, verbose: int = 0) -> None:
         )
         result: JobResult
         try:
-            await interaction.response.defer(thinking=True)
+            await interaction.response.defer(thinking=True, ephemeral=not is_public)
             result = await queue.run(
                 provider, lambda: _run_command(argv), on_queued=on_queued, on_start=on_start
             )
@@ -559,7 +604,7 @@ def run_discord_bot(*, verbose: int = 0) -> None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-            if is_extraction:
+            if limited:
                 queue.release(user_id)
 
         duration = int(time.monotonic() - started_at) if started_at else 0
@@ -569,22 +614,42 @@ def run_discord_bot(*, verbose: int = 0) -> None:
         )
         status = "✅ Completed" if result.ok else "❌ Failed"
         color = discord.Color.green() if result.ok else discord.Color.red()
-        await interaction.edit_original_response(
-            embed=_embed(title, status, color, [("Duration", f"{duration}s")])
+        output = result.text or "(no output)"
+        long_output = len(output) > _INLINE_OUTPUT_LIMIT
+        attachment = (
+            discord.File(io.BytesIO(output.encode("utf-8")), filename="rip-output.txt")
+            if long_output else None
         )
 
-        output = result.text or "(no output)"
+        # The output embed (private to the requester): status, duration, and the
+        # captured output inline (or a note that it's attached).
         result_embed = _embed(title, status, color, [("Duration", f"{duration}s")])
-        if len(output) > _INLINE_OUTPUT_LIMIT:
+        if command_label == "status":
+            snap = queue.snapshot()
+            result_embed.add_field(name="Bot uptime", value=_fmt_uptime(time.monotonic() - bot_started))
+            result_embed.add_field(name="In flight", value=str(snap["in_flight"]))
+            result_embed.add_field(name="Busy lanes", value=", ".join(snap["busy_lanes"]) or "idle")
+            result_embed.add_field(name="Admins", value=str(len(admin_ids)))
+        if long_output:
             result_embed.add_field(name="Output", value="Attached as `rip-output.txt`.", inline=False)
+        elif output != "(no output)":
+            result_embed.description = f"{status}\n```\n{output}\n```"
+
+        if is_public:
+            # Progress stays public (no output); the requester gets the output
+            # in a private follow-up so the guild never sees the ripped data.
+            await interaction.edit_original_response(
+                embed=make_embed(status, color, [("Duration", f"{duration}s")])
+            )
             await interaction.followup.send(
-                embed=result_embed,
-                file=discord.File(io.BytesIO(output.encode("utf-8")), filename="rip-output.txt"),
-                ephemeral=True,
+                embed=result_embed, file=attachment, ephemeral=True
             )
         else:
-            result_embed.description = f"{status}\n```\n{output}\n```"
-            await interaction.followup.send(embed=result_embed, ephemeral=True)
+            # Already ephemeral — deliver everything in the single original
+            # message (a file attachment still needs a follow-up).
+            await interaction.edit_original_response(embed=result_embed)
+            if attachment is not None:
+                await interaction.followup.send(file=attachment, ephemeral=True)
 
     rip_group = app_commands.Group(
         name="rip", description="Queue RIPart actions — providers run in parallel."

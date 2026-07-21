@@ -132,8 +132,17 @@ detail and `-vv` to also unmute discord.py's client log:
 `uv run --extra discord rip discord-bot -v`. Raw Discord API payloads are never
 logged at any level.
 
+During development, `--reload` restarts the bot whenever a source file under
+`ripart/` changes, so you don't have to kill and relaunch after each edit
+(`uv run --extra discord rip discord-bot --reload`). It uses
+[watchfiles](https://pypi.org/project/watchfiles/) (installed with the
+`discord` extra); leave it off in production.
+
 The bot registers discoverable commands such as `/rip janitor extract`,
-`/rip saucepan list`, and `/rip clank status` in `DISCORD_GUILD_ID`. Select the
+`/rip saucepan list`, and `/rip clank status` in `DISCORD_GUILD_ID`. `/rip
+status` gives a one-shot overview — every provider's auth state, the local
+library card count, plus bot uptime, in-flight extractions, and busy lanes.
+Select the
 provider and action from Discord's command picker. Discord displays each
 action's typed inputs and CLI flags; `extract` actions require a `uuid` field
 (paste the UUID shown by a list/search result). Commands with no inputs show no
@@ -144,10 +153,12 @@ for the same provider run one at a time — so the shared JanitorAI browser
 profile and each provider's session are never used concurrently — while
 different providers extract in parallel. Anyone in the guild can submit, but
 each person may have only **one extraction** queued or running at once (quick
-read-only commands like `status`/`list` are exempt). The channel shows a
-queued (with position in the provider's lane) → running (elapsed) → completed
-status; the CLI output and any long-output attachment stay private to the
-person who ran the command.
+read-only commands like `status`/`list` are exempt). Extractions post public
+progress (labelled with who ran it and the provider lane) so the guild can see
+lane activity: queued (with position in the lane) → running (elapsed) →
+completed. Personal/read-only commands are fully **ephemeral** — no channel
+noise. Either way the CLI output and any long-output attachment stay private to
+the person who ran the command.
 
 Any member of the configured guild can use the commands (or only members in
 `DISCORD_COMMAND_CHANNEL_ID` when that optional channel restriction is set).

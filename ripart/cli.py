@@ -23,6 +23,7 @@ from . import cli_extractors
 from .common.cards import save_to_library
 from .common.discord_forum import publish_saved_card
 from .common.lorebooks import update_lorebook_library
+from .common.storage import state_path
 from .common.text import safe_name, write_json
 from .providers import chub as cb
 from .providers import clank as ck
@@ -998,6 +999,57 @@ for _janitor_root_command in ("status", "login", "import-session", "lorebook", "
 
 
 # --------------------------------------------------------------------------- #
+# status (cross-provider overview)
+# --------------------------------------------------------------------------- #
+
+
+@main.command("status")
+def status_overview() -> None:
+    """Show the auth state of every provider plus the local library."""
+    console.print("[bold]Providers[/]")
+
+    # JanitorAI: a real login check needs the browser, so this only reports a
+    # saved session. ponytail: cheap file probe; `rip janitor status` verifies.
+    if state_path("janitor-session.json").exists():
+        _ok("janitor    session saved [dim](verify with [bold]rip janitor status[/])[/]")
+    else:
+        _no("janitor    no session [dim](run [bold]rip janitor login[/])[/]")
+
+    if sp.has_token():
+        exp = sp.token_expiry()
+        remaining = None if exp is None else exp - time.time()
+        if remaining is not None and remaining <= 0:
+            _no("saucepan   token expired [dim](run [bold]rip saucepan login[/])[/]")
+        elif remaining is not None:
+            _ok(f"saucepan   token configured [dim](expires in {_fmt_expiry(remaining)})[/]")
+        else:
+            _ok("saucepan   token configured")
+    else:
+        _no("saucepan   no token [dim](run [bold]rip saucepan login[/])[/]")
+
+    if ck.has_session():
+        has_csrf = bool(ck.load_session().get("csrf_token"))
+        _ok("clank      session configured" + ("" if has_csrf else " [dim](no csrf token)[/]"))
+    else:
+        _no("clank      no session [dim](run [bold]rip clank login[/])[/]")
+
+    if sc.has_token():
+        remaining = sc.token_expiry() - time.time()
+        if remaining <= 0:
+            _no("spicychat  token expired [dim](run [bold]rip spicychat login[/])[/]")
+        else:
+            _ok(f"spicychat  session configured [dim](expires in {_fmt_expiry(remaining)})[/]")
+    else:
+        _no("spicychat  guest only [dim](run [bold]rip spicychat login[/] for gated cards)[/]")
+
+    library = OUT / "library"
+    cards = len(list(library.glob("*.png"))) if library.is_dir() else 0
+    console.print("\n[bold]Library[/]")
+    _field("cards", cards)
+    _path("location", library)
+
+
+# --------------------------------------------------------------------------- #
 # saucepan
 # --------------------------------------------------------------------------- #
 
@@ -1825,11 +1877,40 @@ def completion(shell: str | None) -> None:
 
 @main.command("discord-bot")
 @discord_verbose_option
-def discord_bot(verbose: int) -> None:
+@click.option(
+    "--reload",
+    "reload_",
+    is_flag=True,
+    help="Dev: auto-restart the bot whenever a source file changes.",
+)
+def discord_bot(verbose: int, reload_: bool) -> None:
     """Serve the one-at-a-time `/rip` Discord command gateway."""
     from .common.discord_bot import run_discord_bot
 
-    run_discord_bot(verbose=verbose)
+    if not reload_:
+        run_discord_bot(verbose=verbose)
+        return
+
+    try:
+        from watchfiles import run_process
+    except ImportError:
+        raise SystemExit("--reload needs watchfiles — install it with `uv sync --extra discord`")
+
+    # Run the bot as a real subprocess (not a multiprocessing-spawn callable) so
+    # a reload's SIGINT reaches discord.py's own handler and the gateway closes
+    # gracefully — no mid-import KeyboardInterrupt traceback, no SIGKILL.
+    import shlex
+
+    argv = [sys.executable, "-m", "ripart", "discord-bot"]
+    if verbose:
+        argv.append("-" + "v" * verbose)
+    console.print("[dim]watching ripart/ — the bot restarts on save (Ctrl-C to stop)[/]")
+    run_process(
+        Path(__file__).resolve().parent,  # the ripart package
+        target=shlex.join(argv),
+        target_type="command",
+        callback=lambda changes: console.print(f"[dim]↻ reloading — {len(changes)} file(s) changed[/]"),
+    )
 
 
 if __name__ == "__main__":

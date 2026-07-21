@@ -821,6 +821,37 @@ def _create_chat(driver, character_id: str) -> str:
     return str(data["id"])
 
 
+def _recover_chat_greetings(driver, chat_id: str, meta: dict[str, Any]) -> None:
+    """Backfill greetings that the standalone character endpoint gates to null.
+
+    ``/hampter/characters/{id}`` nulls the primary greeting (``first_messages[0]``)
+    for gated cards, but ``/hampter/chats/{chat_id}`` returns the same character
+    object with every greeting populated - it has to, since the chat is seeded
+    with the real first message. Merge those into ``meta`` in place so
+    ``collect_greetings`` sees the primary greeting the user gets on the page.
+    """
+    try:
+        chat = _fetch_json(driver, f"{ORIGIN}/hampter/chats/{chat_id}")
+    except Exception:
+        return
+    character = chat.get("character") if isinstance(chat, dict) else None
+    if not isinstance(character, dict):
+        return
+    def _blank(value: Any) -> bool:
+        return not (value.strip() if isinstance(value, str) else value)
+
+    chat_greetings = character.get("first_messages")
+    if isinstance(chat_greetings, list):
+        merged = list(meta.get("first_messages") or [])
+        merged += [None] * (len(chat_greetings) - len(merged))
+        for i, value in enumerate(chat_greetings):
+            if _blank(merged[i]):
+                merged[i] = value
+        meta["first_messages"] = merged
+    if _blank(meta.get("first_message")):
+        meta["first_message"] = character.get("first_message") or ""
+
+
 def _delete_chat(driver, chat_id: str) -> bool:
     if not chat_id:
         return False
@@ -1680,6 +1711,7 @@ def _extract_character(
         if mode == "jllm":
             _clog("creating chat (JanitorLLM leak)")
             chat_id = _create_chat(driver, character_id)
+            _recover_chat_greetings(driver, chat_id, meta)
             greetings = collect_greetings(meta)
             first_message = greetings[0] if greetings else ""
             base_messages = (
@@ -1755,6 +1787,7 @@ def _extract_character(
 
         _clog("creating chat")
         chat_id = _create_chat(driver, character_id)
+        _recover_chat_greetings(driver, chat_id, meta)
         greetings = collect_greetings(meta)
         first_message = greetings[0] if greetings else ""
         base_messages = (
