@@ -21,6 +21,7 @@ from rich.table import Table
 
 from . import cli_extractors
 from .common.cards import save_to_library
+from .common.discord_forum import publish_saved_card
 from .common.lorebooks import update_lorebook_library
 from .common.text import safe_name, write_json
 from .providers import chub as cb
@@ -43,7 +44,7 @@ from .providers.janitor import (
 # --------------------------------------------------------------------------- #
 
 # Keep everything self-contained under this project directory.
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "output" / "cli"
 
 console = Console()
@@ -54,12 +55,15 @@ err_console = Console(stderr=True)
 # Beautiful help configuration (rich-click)
 # --------------------------------------------------------------------------- #
 
-click.rich_click.USE_RICH_MARKUP = True
-click.rich_click.USE_MARKDOWN = False
+click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.GROUP_ARGUMENTS_OPTIONS = False
-click.rich_click.SHOW_METAVARS_COLUMN = True
-click.rich_click.APPEND_METAVARS_HELP = False
+click.rich_click.OPTIONS_TABLE_COLUMN_TYPES = [
+    "required", "opt_short", "opt_long", "metavar", "help"
+]
+click.rich_click.OPTIONS_TABLE_HELP_SECTIONS = [
+    "help", "deprecated", "envvar", "default", "required"
+]
 click.rich_click.STYLE_OPTION = "bold cyan"
 click.rich_click.STYLE_ARGUMENT = "bold cyan"
 click.rich_click.STYLE_COMMAND = "bold green"
@@ -71,17 +75,7 @@ click.rich_click.MAX_WIDTH = 100
 click.rich_click.COMMAND_GROUPS = {
     "rip": [
         {"name": "JanitorAI", "commands": ["janitor"]},
-        {
-            "name": "JanitorAI (legacy aliases)",
-            "commands": [
-                "status",
-                "login",
-                "import-session",
-                "inspect",
-                "extract",
-                "recent",
-            ],
-        },
+        {"name": "Open-card URL routing", "commands": ["extract"]},
         {"name": "Saucepan", "commands": ["saucepan"]},
         {"name": "Clank", "commands": ["clank"]},
         {"name": "Spicychat", "commands": ["spicychat"]},
@@ -255,11 +249,9 @@ def main() -> None:
       3. rip janitor inspect <url>     peek at a character's public metadata
       4. rip janitor extract <url>     rip the full card + lorebook
 
-    [bold]rip extract <url>[/] also accepts Saucepan and clank.world URLs; see
-    [bold]rip saucepan[/], [bold]rip clank[/], and [bold]rip spicychat[/] for
-    their own login/extract commands. The original root-level JanitorAI commands
-    remain available as aliases. Results are written under [cyan]output/cli/[/]. Run
-    [bold]rip COMMAND --help[/] for details on any command.
+    [bold]rip extract <url>[/] routes open-card URLs to their matching extractor.
+    Use each provider group for authenticated extraction. Results are written
+    under [cyan]output/cli/[/]. Run [bold]rip COMMAND --help[/] for details.
     """
 
 
@@ -699,15 +691,12 @@ def extract(
     )
     elapsed = time.monotonic() - started
     paths = save_to_library(OUT / "library", result.get("characterId") or "", result)
+    publish_saved_card(result.get("characterId") or "", result, paths)
 
     _ok(
         f"extracted [bold]{result.get('characterName') or result.get('characterId') or url}[/]"
     )
     _path("card png", paths["png"])
-    if paths.get("discord_thread"):
-        _field("Discord forum", f"published to thread {paths['discord_thread']}")
-    elif paths.get("discord_error"):
-        _no(f"Discord publish failed: {paths['discord_error']}")
     _field("entries found", len(result.get("entries") or []))
     if (result.get("character") or {}).get("definitionSource") == "reconstructed-jllm":
         _field("definition", "[yellow]reconstructed via JanitorLLM (lossy)[/]")
@@ -956,15 +945,8 @@ def _write_extracts(extracted: list) -> None:
         secs = entry.get("seconds")
         timing = f" [dim]({secs}s)[/]" if secs is not None else ""
         tag = " [yellow](jllm-reconstructed)[/]" if entry.get("reconstructed") else ""
-        discord = (
-            f" · Discord thread {paths['discord_thread']}"
-            if paths.get("discord_thread")
-            else f" · [red]Discord failed: {paths['discord_error']}[/]"
-            if paths.get("discord_error")
-            else ""
-        )
         _ok(
-            f"{result.get('characterName') or entry.get('name')}{tag} - {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]{discord}"
+            f"{result.get('characterName') or entry.get('name')}{tag} - {entry.get('entries', 0)} entries{timing} → [cyan]{paths['png']}[/]"
         )
 
 
@@ -1001,19 +983,18 @@ def janitor() -> None:
       3. rip janitor list
       4. rip janitor extract <url>
 
-    The root-level [bold]rip login[/], [bold]rip extract[/], and related JanitorAI
-    commands remain supported as backwards-compatible aliases.
     """
 
 
-# JanitorAI predates the provider groups, so these commands were originally
-# registered directly on `rip`. Register the same command objects here rather
-# than maintaining two wrappers whose options could drift apart.
+# Register each JanitorAI command once under its provider group.
 for _janitor_command in (status, login, import_session, lorebook, inspect, extract, recent):
     janitor.add_command(_janitor_command)
-# Provider groups use `list`; retain `recent` too because it describes the
-# ordering and preserves the original JanitorAI command name.
 janitor.add_command(recent, "list")
+
+# ``extract`` remains at the root as the supported cross-provider URL router.
+# All other JanitorAI commands must be invoked through ``rip janitor``.
+for _janitor_root_command in ("status", "login", "import-session", "lorebook", "inspect", "recent"):
+    main.commands.pop(_janitor_root_command, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -1164,22 +1145,12 @@ def saucepan_list(
     _field("listed", f"{len(companions)} of {total} companion(s) (offset={offset})")
 
     if do_extract:
-        library_dir = OUT / "library"
-        saved = skipped = 0
-        for companion in companions:
-            companion_id = str(companion.get("id") or companion.get("companion_id") or "")
-            if _library_has_card(library_dir, companion_id):
-                skipped += 1
-                continue
-            try:
-                extracted = sp.extract_companion(companion_id)
-                save_to_library(library_dir, extracted.get("characterId") or companion_id, extracted)
-                saved += 1
-            except sp.SaucepanError as exc:
-                err_console.print(
-                    f"[yellow]![/] {companion.get('display_name') or companion.get('name')}: {exc}"
-                )
-        _ok(f"saved [bold]{saved}[/] card(s); skipped [bold]{skipped}[/] existing card(s) to {library_dir}")
+        cli_extractors.save_listed_cards(
+            _extraction_ui(), companions,
+            item_id=lambda item: str(item.get("id") or item.get("companion_id") or ""),
+            item_name=lambda item: str(item.get("display_name") or item.get("name") or "?"),
+            extract=lambda item: sp.extract_companion(str(item.get("id") or item.get("companion_id") or "")),
+        )
 
 
 @saucepan.command("providers")
@@ -1452,24 +1423,13 @@ def clank_list(
     _field("listed", f"{len(items)} stories (sort={sort})")
 
     if do_extract:
-        library_dir = OUT / "library"
-        saved = skipped = 0
-        for it in items:
-            story_id = str(it.get("agent_id") or it.get("id") or "")
-            if _library_has_card(
-                library_dir, story_id, source_url=ck.story_character_url(it)
-            ):
-                skipped += 1
-                continue
-            try:
-                result = ck.extract_story(it)
-                save_to_library(library_dir, result.get("characterId") or story_id, result)
-                saved += 1
-            except ck.ClankError as exc:
-                err_console.print(f"[yellow]![/] {it.get('agent_name')}: {exc}")
-        _ok(
-            f"saved [bold]{saved}[/] partial card(s); skipped [bold]{skipped}[/] existing card(s) "
-            f"to {library_dir} [dim](clank-partial)[/]"
+        cli_extractors.save_listed_cards(
+            _extraction_ui(), items,
+            item_id=lambda item: str(item.get("agent_id") or item.get("id") or ""),
+            item_name=lambda item: str(item.get("agent_name") or "?"),
+            extract=ck.extract_story,
+            source_url=ck.story_character_url,
+            suffix=" [dim](clank-partial)[/]",
         )
 
 
@@ -1732,20 +1692,12 @@ def _spicychat_list(
     _field("found", f"{result.get('found', len(hits))} total (showing {len(hits)})")
 
     if do_extract:
-        library_dir = OUT / "library"
-        saved = skipped = 0
-        for doc in hits:
-            cid = str(doc.get("character_id") or "")
-            if _library_has_card(library_dir, cid):
-                skipped += 1
-                continue
-            try:
-                res = sc.extract_character(cid)
-                save_to_library(library_dir, res.get("characterId") or cid, res)
-                saved += 1
-            except sc.SpicyChatError as exc:
-                err_console.print(f"[yellow]![/] {doc.get('name')}: {exc}")
-        _ok(f"saved [bold]{saved}[/] card(s); skipped [bold]{skipped}[/] existing card(s) to {library_dir}")
+        cli_extractors.save_listed_cards(
+            _extraction_ui(), hits,
+            item_id=lambda item: str(item.get("character_id") or ""),
+            item_name=lambda item: str(item.get("name") or "?"),
+            extract=lambda item: sc.extract_character(str(item.get("character_id") or "")),
+        )
 
 
 @spicychat.command("extract")

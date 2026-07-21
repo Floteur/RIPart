@@ -660,28 +660,4 @@ def save_to_library(
     paths = {"png": str(png_path)}
     if lorebook_paths:
         paths["lorebooks"] = lorebook_paths
-    # Auto-publish to the Discord archive forum (UUID-keyed upsert). Best-effort
-    # and env-gated: a no-op unless DISCORD_BOT_TOKEN is configured in .env, and
-    # a Discord failure never propagates out of a rip. This is the single "push"
-    # chokepoint every provider funnels through, so every rip publishes for free.
-    from .discord_forum import publish_card, publish_lorebooks
-
-    published = publish_card(character_id, result, png_path)
-    if published and published.get("thread_id"):
-        paths["discord_thread"] = published["thread_id"]
-    elif published and published.get("action") == "error":
-        paths["discord_error"] = published.get("error") or "unknown Discord error"
-    lorebook_published = publish_lorebooks(lorebook_paths)
-    lorebook_threads = [
-        outcome["thread_id"]
-        for outcome in lorebook_published
-        if outcome.get("thread_id")
-    ]
-    if lorebook_threads:
-        paths["discord_lorebook_threads"] = lorebook_threads
-    lorebook_errors = [
-        outcome.get("error") for outcome in lorebook_published if outcome.get("action") == "error"
-    ]
-    if lorebook_errors:
-        paths["discord_lorebook_error"] = "; ".join(str(error) for error in lorebook_errors)
     return paths

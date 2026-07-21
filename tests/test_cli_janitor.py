@@ -111,3 +111,12 @@ def test_provider_extract_adapter_binds_current_cli_output_directory(monkeypatch
         "url": "companion-42",
         "kwargs": {"leak": True, "verbose": 2},
     }
+
+
+def test_root_help_has_no_janitor_legacy_aliases():
+    result = CliRunner().invoke(cli.main, ["--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "JanitorAI (legacy aliases)" not in result.output
+    assert "import-session" not in result.output
+    assert "rip janitor" in result.output

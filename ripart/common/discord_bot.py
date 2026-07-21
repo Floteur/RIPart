@@ -16,6 +16,7 @@ import io
 import inspect
 import logging
 import os
+import re
 import shlex
 import sys
 import time
@@ -36,13 +37,7 @@ _LOG = logging.getLogger(__name__)
 # command.  Its fields are generated from the Click parameters below, so
 # Discord shows the same input names, types, and choices as the CLI.
 _ROOT_ACTIONS: dict[str, str] = {
-    "status": "Check the JanitorAI login state.",
-    "login": "Open the JanitorAI login flow.",
-    "import-session": "Import a JanitorAI session file.",
-    "lorebook": "Index one JanitorAI lorebook.",
-    "inspect": "Inspect one character.",
     "extract": "Extract one character or supported card URL.",
-    "recent": "List recent JanitorAI characters.",
     "completion": "Print local shell-completion instructions.",
 }
 _PROVIDER_ACTIONS: dict[str, dict[str, str]] = {
@@ -342,6 +337,7 @@ class SerialCommandRunner:
             cwd=_ROOT,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            env=_child_env(),
         )
         await self._notify(progress, CommandProgress("started", pid=process.pid))
 
@@ -412,29 +408,46 @@ def _admin_user_ids() -> set[int]:
     return admin_ids
 
 
-def _result_preview(result: CommandResult) -> str:
-    output = result.output.strip() or "(no output)"
-    if len(output) > 1_500:
-        output = "…\n" + output[-1_500:]
-    status = "completed" if result.returncode == 0 else f"failed (exit {result.returncode})"
-    suffix = "\nOutput was capped at 1 MiB." if result.truncated else ""
-    return f"{status}: `rip {' '.join(result.argv)}`\n```\n{output}\n```{suffix}"
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _child_env() -> dict[str, str]:
+    """Force plain, unbuffered CLI output so captured text renders cleanly in Discord.
+
+    ``NO_COLOR``/``TERM`` stop Rich from emitting ANSI styling into the pipe,
+    ``COLUMNS`` keeps table wrapping readable, and ``PYTHONUNBUFFERED`` makes the
+    child flush line-by-line so the live-progress tail actually updates.
+    """
+    return {
+        **os.environ,
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+        "COLUMNS": "80",
+        "PYTHONUNBUFFERED": "1",
+    }
+
+
+def _clean_output(text: str) -> str:
+    """Strip stray terminal escape codes and trailing whitespace from CLI output."""
+    return _ANSI_RE.sub("", text).strip()
 
 
 def _configure_logging(verbose: int) -> None:
-    """Emit useful bot diagnostics without logging Discord payloads.
+    """Set up readable bot diagnostics on by default, without logging payloads.
 
-    discord.py's debug transport and gateway loggers include full API payloads.
-    Those can contain account metadata and interaction contents, so verbosity is
-    deliberately limited to lifecycle and command-queue diagnostics.
+    Lifecycle and command-queue events are logged at INFO with no ``-v`` needed,
+    so a normally-started bot is no longer silent. ``-v`` adds our own DEBUG
+    detail; ``-vv`` also unmutes discord.py's client logger. discord.py's HTTP
+    and gateway loggers include full API payloads (account metadata, interaction
+    contents), so they stay at WARNING at every verbosity.
     """
-    if not verbose:
-        return
     logging.basicConfig(
         level=logging.DEBUG if verbose > 1 else logging.INFO,
-        format="%(levelname)s:%(name)s:%(message)s",
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
     )
-    logging.getLogger("discord").setLevel(logging.INFO)
+    _LOG.setLevel(logging.DEBUG if verbose else logging.INFO)
+    logging.getLogger("discord").setLevel(logging.DEBUG if verbose > 1 else logging.INFO)
     logging.getLogger("discord.http").setLevel(logging.WARNING)
     logging.getLogger("discord.gateway").setLevel(logging.WARNING)
 
@@ -478,7 +491,10 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
             runner.start()
-            _LOG.info("Discord command gateway ready for guild %s", guild_id)
+            _LOG.info(
+                "gateway ready as %s — guild %s, channel %s, %d admin(s), %ds timeout",
+                self.user, guild_id, channel_id or "any", len(admin_ids), timeout,
+            )
 
         async def close(self) -> None:
             await runner.close()
@@ -486,19 +502,30 @@ def run_discord_bot(*, verbose: int = 0) -> None:
 
     client = RipDiscordClient()
 
-    async def dispatch(interaction, argv: list[str]) -> None:
+    def _embed(title: str, description: str, color, fields=()):
+        embed = discord.Embed(title=title, description=description, color=color)
+        for name, value in fields:
+            embed.add_field(name=name, value=value, inline=True)
+        return embed
+
+    async def dispatch(interaction, argv: list[str], *, command_label: str) -> None:
         if interaction.guild_id != guild_id or (
             channel_id is not None and interaction.channel_id != channel_id
         ):
-            await interaction.response.send_message("This command is not available here.", ephemeral=True)
+            await interaction.response.send_message(
+                "⛔ This command isn't available in this channel.", ephemeral=True
+            )
             return
         await interaction.response.defer(thinking=True)
+        # The public status never shows CLI output or the argument values (which
+        # may carry secrets, e.g. a login password); only the requester sees the
+        # captured output, in the ephemeral message below.
+        title = f"rip {command_label}"
         started_at: float | None = None
         last_output_at: float | None = None
         pid: int | None = None
         output_tail = ""
         finished = asyncio.Event()
-        private_progress = None
 
         async def on_progress(update: CommandProgress) -> None:
             nonlocal started_at, last_output_at, output_tail, pid
@@ -507,19 +534,20 @@ def run_discord_bot(*, verbose: int = 0) -> None:
                 pid = update.pid
             elif update.output:
                 last_output_at = time.monotonic()
-                output_tail = (output_tail + update.output)[-1_500:]
+                output_tail = _clean_output(output_tail + update.output)[-1_500:]
 
         position, result_future = runner.enqueue(argv, progress=on_progress)
-        _LOG.info("Discord command queued: %s (position %d)", " ".join(argv[:2]), position)
-        command_name = " ".join(argv[:2])
-        message = (
-            f"⌛ RIPart command queued: `{command_name}` — starting now."
-            if position == 1
-            else f"⌛ RIPart command queued: `{command_name}` — position {position}."
+        _LOG.info(
+            "queued `%s` for %s (%s) — position %d",
+            command_label, interaction.user, interaction.user.id, position,
         )
-        await interaction.edit_original_response(content=message)
-        private_progress = await interaction.followup.send(
-            "Waiting for the serial worker…", ephemeral=True, wait=True
+        queued = "Starting now…" if position == 1 else f"Queued — position {position} in line."
+        await interaction.edit_original_response(
+            embed=_embed(title, f"⌛ {queued}", discord.Color.blurple())
+        )
+        live = await interaction.followup.send(
+            embed=_embed(title, "Waiting for the serial worker…", discord.Color.blurple()),
+            ephemeral=True, wait=True,
         )
 
         async def refresh_status() -> None:
@@ -527,23 +555,20 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             while not finished.is_set():
                 if started_at is not None:
                     elapsed = int(time.monotonic() - started_at)
-                    activity = (
-                        f" · last CLI output {int(time.monotonic() - last_output_at)}s ago"
-                        if last_output_at is not None
-                        else ""
-                    )
-                    process_id = f" · PID {pid}" if pid is not None else ""
+                    fields = [("Elapsed", f"{elapsed}s")]
+                    if pid is not None:
+                        fields.append(("PID", str(pid)))
+                    if last_output_at is not None:
+                        fields.append(("Last output", f"{int(time.monotonic() - last_output_at)}s ago"))
                     try:
                         await interaction.edit_original_response(
-                            content=(
-                                f"▶ RIPart command running: `{command_name}`{process_id}"
-                                f" · {elapsed}s elapsed{activity}"
-                            )
+                            embed=_embed(title, "▶ Running", discord.Color.gold(), fields)
                         )
-                        if output_tail and private_progress is not None:
-                            tail = output_tail[-1_500:]
-                            await private_progress.edit(
-                                content=f"Live CLI output for `{command_name}`:\n```\n{tail}\n```"
+                        if output_tail:
+                            await live.edit(
+                                embed=_embed(
+                                    title, f"▶ Running\n```\n{output_tail}\n```", discord.Color.gold()
+                                )
                             )
                     except Exception:  # noqa: BLE001 - CLI work must stay independent of UI edits
                         _LOG.warning("Unable to refresh Discord command status", exc_info=True)
@@ -560,26 +585,36 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await refresh_task
+
+        duration = int(time.monotonic() - started_at) if started_at is not None else 0
+        ok = result.returncode == 0
         _LOG.info(
-            "Discord command finished: %s (exit %d)", " ".join(argv[:2]), result.returncode
+            "finished `%s` for %s — exit %d in %ds%s",
+            command_label, interaction.user, result.returncode, duration,
+            " (output truncated)" if result.truncated else "",
         )
-        elapsed = int(time.monotonic() - started_at) if started_at is not None else 0
-        outcome = "completed" if result.returncode == 0 else f"failed (exit {result.returncode})"
+        status = "✅ Completed" if ok else f"❌ Failed — exit {result.returncode}"
+        color = discord.Color.green() if ok else discord.Color.red()
         await interaction.edit_original_response(
-            content=f"{'✅' if result.returncode == 0 else '❌'} RIPart command {outcome}: `{command_name}` · {elapsed}s"
+            embed=_embed(title, status, color, [("Duration", f"{duration}s")])
         )
-        if private_progress is not None:
-            await private_progress.edit(content="CLI process finished; full result follows.")
-        preview = _result_preview(result)
+
+        output = _clean_output(result.output) or "(no output)"
+        result_embed = _embed(title, status, color, [("Duration", f"{duration}s")])
         attachment = None
-        if len(result.output) > 1_500:
+        if len(output) > 1_500 or result.truncated:
+            result_embed.add_field(name="Output", value="Attached as `rip-output.txt`.", inline=False)
+            if result.truncated:
+                result_embed.set_footer(text="Output capped at 1 MiB.")
             attachment = discord.File(
                 io.BytesIO(result.output.encode("utf-8")), filename="rip-output.txt"
             )
-        followup_kwargs = {"ephemeral": True}
+        else:
+            result_embed.description = f"{status}\n```\n{output}\n```"
+
+        await live.edit(embed=result_embed)
         if attachment is not None:
-            followup_kwargs["file"] = attachment
-        await interaction.followup.send(preview, **followup_kwargs)
+            await interaction.followup.send(file=attachment, ephemeral=True)
 
     rip_group = app_commands.Group(
         name="rip", description="Run RIPart actions serially (one at a time)."
@@ -601,7 +636,7 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             except ValueError as exc:
                 await interaction.response.send_message(str(exc), ephemeral=True)
                 return
-            await dispatch(interaction, argv)
+            await dispatch(interaction, argv, command_label=" ".join((*prefix, action)))
 
         callback.__name__ = f"{('_'.join(prefix) or 'root')}_{action}".replace("-", "_")
         callback.__signature__ = inspect.Signature(  # type: ignore[attr-defined]

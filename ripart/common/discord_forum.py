@@ -791,6 +791,17 @@ def publish_card(
         return {"action": "error", "uuid": character_id, "error": str(exc)}
 
 
+def publish_saved_card(character_id: str, result: dict[str, Any], paths: dict[str, Any]) -> dict[str, Any]:
+    """Explicit post-save event that publishes a card and its lorebooks."""
+    outcome = publish_card(character_id, result, Path(paths["png"]))
+    if outcome and outcome.get("thread_id"):
+        paths["discord_thread"] = outcome["thread_id"]
+    elif outcome and outcome.get("action") == "error":
+        paths["discord_error"] = outcome.get("error") or "unknown Discord error"
+    publish_lorebooks(paths.get("lorebooks") or [])
+    return paths
+
+
 def publish_lorebooks(lorebook_paths: list[str]) -> list[dict[str, Any]]:
     """Best-effort upsert of changed library lorebooks to their dedicated forum.
 

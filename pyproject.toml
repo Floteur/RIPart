@@ -27,25 +27,9 @@ rip = "ripart.cli:main"
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
-# Flat layout: the module files live directly in this directory, so map the
-# `ripart` import package onto ".". This keeps the files where they are while
-# still exposing a proper `ripart` package (needed by the relative imports and
-# the `rip` entry point above).
-[tool.setuptools]
-packages = [
-    "ripart",
-    "ripart.common",
-    "ripart.providers",
-    "ripart.providers.janitor",
-    "ripart.providers.saucepan",
-    "ripart.providers.clank",
-    "ripart.providers.spicychat",
-]
-
-[tool.setuptools.package-dir]
-ripart = "."
+[tool.setuptools.packages.find]
+include = ["ripart*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# The tests import the installed `ripart` package (see the flat layout above);
-# they can also be run without pytest: `python tests/test_saucepan.py`.
+# Tests import the installed `ripart` package from the explicit package directory.

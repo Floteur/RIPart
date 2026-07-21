@@ -28,13 +28,11 @@ class CredentialStore:
         empty: Any,
         loads: Callable[[str], Any] = lambda s: s.strip(),
         dumps: Callable[[Any], str] = lambda v: str(v),
-        legacy_path: Path | None = None,
     ) -> None:
         self._path = Path(path)
         self._empty = empty
         self._loads = loads
         self._dumps = dumps
-        self._legacy_path = Path(legacy_path) if legacy_path else None
         self._value: Any = None  # None = not yet loaded from disk
         self._override = threading.local()
 
@@ -60,13 +58,6 @@ class CredentialStore:
     def load(self) -> Any:
         """Read the persisted credential into memory (called on first use)."""
         if self._value is None:
-            if not self._path.exists() and self._legacy_path and self._legacy_path.exists():
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    self._legacy_path.replace(self._path)
-                except OSError:
-                    # Use an unmigrated credential rather than logging the user out.
-                    self._path = self._legacy_path
             if self._path.exists():
                 # Tighten perms on an existing (possibly world-readable) file.
                 try:

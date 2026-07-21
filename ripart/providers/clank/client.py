@@ -12,7 +12,6 @@ from __future__ import annotations
 import json
 import re
 from contextlib import contextmanager
-from pathlib import Path
 
 import httpx
 
@@ -32,7 +31,6 @@ TIMEOUT = 30
 
 # Session cookies are stored in RIPart's application-state directory. A small JSON object:
 # {"session_token": "...", "csrf_token": "..."}. Never printed back to the user.
-_LEGACY_SESSION_FILE = Path(__file__).resolve().parents[2] / ".clank-session.json"
 SESSION_FILE = state_path("clank-session.json")
 
 
@@ -53,7 +51,6 @@ _creds = CredentialStore(
     empty={},
     loads=json.loads,
     dumps=json.dumps,
-    legacy_path=_LEGACY_SESSION_FILE,
 )
 
 

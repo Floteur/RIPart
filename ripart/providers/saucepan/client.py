@@ -11,7 +11,6 @@ import base64
 import json
 import re
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -31,7 +30,6 @@ _RETRY_ATTEMPTS = 3
 
 # Token is state kept outside the package tree. One line, the raw bearer token;
 # it is never printed back to the user.
-_LEGACY_TOKEN_FILE = Path(__file__).resolve().parents[2] / ".saucepan-token"
 TOKEN_FILE = state_path("saucepan-token")
 
 
@@ -48,7 +46,7 @@ _http = HttpClient(
     error_cls=SaucepanError,
     timeout=TIMEOUT,
 )
-_creds = CredentialStore(TOKEN_FILE, empty="", legacy_path=_LEGACY_TOKEN_FILE)
+_creds = CredentialStore(TOKEN_FILE, empty="")
 
 
 # --------------------------------------------------------------------------- #

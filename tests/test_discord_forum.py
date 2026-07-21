@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ripart.common import discord_forum
+from ripart.common.cards import save_to_library
 from ripart.common.discord_forum import (
     ForumPublisher,
     _detail_embed_batches,
@@ -67,6 +68,23 @@ def test_publish_card_reports_discord_errors(monkeypatch, tmp_path):
         "uuid": "c49da2b4-2b9c-479a-a99e-2b979cc22f82",
         "error": "Discord rejected the payload",
     }
+
+
+def test_saving_a_card_does_not_publish_to_discord(monkeypatch, tmp_path):
+    """Persistence is local; callers opt into forum publishing separately."""
+    monkeypatch.setattr(
+        discord_forum,
+        "publish_card",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("published")),
+    )
+
+    paths = save_to_library(
+        tmp_path,
+        "card-1",
+        {"character": {"name": "Card"}, "entries": []},
+    )
+
+    assert paths == {"png": str(tmp_path / "card-1.png")}
 
 
 def test_publish_lorebooks_uses_the_dedicated_publisher(monkeypatch, tmp_path):

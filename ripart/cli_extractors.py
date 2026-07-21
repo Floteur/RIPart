@@ -8,11 +8,13 @@ argument parsing separate from network work and result formatting.
 from __future__ import annotations
 
 import time
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
 from .common.cards import save_to_library
+from .common.discord_forum import publish_saved_card
 from .providers import chub as cb
 from .providers import clank as ck
 from .providers import saucepan as sp
@@ -45,6 +47,56 @@ def _save_leak(ui: ExtractionUI, result: dict) -> Path | None:
     leak_path = ui.library_dir / f"{result.get('characterId') or 'card'}.leak.txt"
     leak_path.write_text(leak_raw, encoding="utf-8")
     return leak_path
+
+
+def _save_and_publish(ui: ExtractionUI, character_id: str, result: dict) -> dict[str, Any]:
+    paths = save_to_library(ui.library_dir, character_id, result)
+    return publish_saved_card(character_id, result, paths)
+
+
+def library_has_card(library_dir: Path, character_id: object, *, source_url: str = "") -> bool:
+    """Return whether an item is already represented by a saved library card."""
+    identifier = str(character_id or "").strip()
+    if identifier and (library_dir / f"{identifier}.png").is_file():
+        return True
+    if not source_url:
+        return False
+    try:
+        index = json.loads((library_dir / "index.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(index, dict) and any(
+        isinstance(entry, dict)
+        and entry.get("url") == source_url
+        and (library_dir / str(entry.get("file") or "")).is_file()
+        for entry in index.values()
+    )
+
+
+def save_listed_cards(
+    ui: ExtractionUI,
+    items: list[dict],
+    *,
+    item_id: Callable[[dict], str],
+    item_name: Callable[[dict], str],
+    extract: Callable[[dict], dict],
+    source_url: Callable[[dict], str] | None = None,
+    suffix: str = "",
+) -> None:
+    """Extract listed provider items, skipping cards already in the library."""
+    saved = skipped = 0
+    for item in items:
+        identifier = item_id(item)
+        if library_has_card(ui.library_dir, identifier, source_url=source_url(item) if source_url else ""):
+            skipped += 1
+            continue
+        try:
+            result = extract(item)
+            _save_and_publish(ui, result.get("characterId") or identifier, result)
+            saved += 1
+        except Exception as exc:  # provider errors are reported per item, not fatal for a batch
+            ui.error(f"[yellow]![/] {item_name(item)}: {exc}")
+    ui.ok(f"saved [bold]{saved}[/] card(s); skipped [bold]{skipped}[/] existing card(s) to {ui.library_dir}{suffix}")
 
 
 def _rank_leak_configs(configs: list[dict]) -> list[dict]:
@@ -124,7 +176,7 @@ def saucepan_extract(
             except sp.SaucepanError:
                 ui.error("[yellow]![/] could not restore the provider system prompt — " f"check config [bold]{leak_config}[/] in Saucepan settings")
     elapsed = time.monotonic() - started
-    paths = save_to_library(ui.library_dir, result.get("characterId") or "", result)
+    paths = _save_and_publish(ui, result.get("characterId") or "", result)
     leak_path = _save_leak(ui, result)
     ui.ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](saucepan)[/]")
     ui.path("card png", paths["png"])
@@ -166,7 +218,7 @@ def clank_extract(ui: ExtractionUI, url: str, *, leak: bool = False, keep_boiler
     finally:
         ck.set_trace_level(0)
     elapsed = time.monotonic() - started
-    paths = save_to_library(ui.library_dir, result.get("characterId") or "", result)
+    paths = _save_and_publish(ui, result.get("characterId") or "", result)
     leak_path = _save_leak(ui, result)
     ui.ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](clank)[/]")
     ui.path("card png", paths["png"])
@@ -207,7 +259,7 @@ def spicychat_extract(ui: ExtractionUI, url: str, *, leak: bool = False, leak_mo
     finally:
         sc.set_trace_level(0)
     elapsed = time.monotonic() - started
-    paths = save_to_library(ui.library_dir, result.get("characterId") or "", result)
+    paths = _save_and_publish(ui, result.get("characterId") or "", result)
     ui.ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim](spicychat)[/]")
     ui.path("card png", paths["png"])
     character, diagnostics = result.get("character") or {}, result.get("diagnostics") or {}
@@ -229,7 +281,7 @@ def spicychat_extract(ui: ExtractionUI, url: str, *, leak: bool = False, leak_mo
 
 
 def _report_open_card(ui: ExtractionUI, result: dict, *, platform: str, url: str, elapsed: float) -> None:
-    paths = save_to_library(ui.library_dir, result.get("characterId") or "card", result)
+    paths = _save_and_publish(ui, result.get("characterId") or "card", result)
     ui.ok(f"extracted [bold]{result.get('characterName') or url}[/] [dim]({platform})[/]")
     ui.path("card png", paths["png"])
     diagnostics = result.get("diagnostics") or {}

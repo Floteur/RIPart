@@ -44,4 +44,8 @@ scripts/accounts.json
 *:Zone.Identifier
 
 # Local, machine-specific Claude Code settings.
-.claude/settings.local.json
+.claude/
+.agents/
+.codex/
+.cursor/
+*.json

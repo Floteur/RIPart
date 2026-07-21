@@ -25,7 +25,6 @@ import re
 import time
 import uuid
 from contextlib import contextmanager
-from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
@@ -59,7 +58,6 @@ TIMEOUT = 30
 
 # Session state in the application-state directory. A small JSON object:
 # {"guest_id", "refresh_token", "access_token", "access_expiry"}. Never printed.
-_LEGACY_SESSION_FILE = Path(__file__).resolve().parents[2] / ".spicychat-session.json"
 SESSION_FILE = state_path("spicychat-session.json")
 
 
@@ -80,7 +78,6 @@ _creds = CredentialStore(
     empty={},
     loads=json.loads,
     dumps=json.dumps,
-    legacy_path=_LEGACY_SESSION_FILE,
 )
 
 
