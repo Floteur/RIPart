@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from ripart.common import discord_forum
 from ripart.common.cards import save_to_library
 from ripart.common.discord_forum import (
@@ -13,6 +15,34 @@ from ripart.common.discord_forum import (
     _lorebook_file_batches,
     _lorebook_files_for,
 )
+
+
+def test_load_env_checks_cwd_and_project_dotenv_files_without_overwriting_env(
+    monkeypatch, tmp_path
+):
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / ".env").write_text(
+        "DISCORD_BOT_TOKEN=project-token\nDISCORD_GUILD_ID=123\n", encoding="utf-8"
+    )
+    working_dir = project_dir / "nested" / "working"
+    working_dir.mkdir(parents=True)
+    (working_dir / ".env").write_text(
+        "DISCORD_BOT_TOKEN=cwd-token\nDISCORD_COMMAND_CHANNEL_ID=456\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(working_dir)
+    monkeypatch.setattr(discord_forum, "_PROJECT_ROOT", project_dir)
+    monkeypatch.delenv("_RIPART_ENV_LOADED", raising=False)
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("DISCORD_GUILD_ID", raising=False)
+    monkeypatch.setenv("DISCORD_COMMAND_CHANNEL_ID", "from-environment")
+
+    discord_forum._load_env()
+
+    assert os.environ["DISCORD_BOT_TOKEN"] == "cwd-token"
+    assert os.environ["DISCORD_GUILD_ID"] == "123"
+    assert os.environ["DISCORD_COMMAND_CHANNEL_ID"] == "from-environment"
 
 
 def test_embed_for_includes_card_metadata_and_attachment_image():

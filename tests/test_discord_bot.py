@@ -7,10 +7,11 @@ import asyncio
 import pytest
 
 from ripart.common.discord_bot import (
-    CommandResult,
-    SerialCommandRunner,
+    ExtractionQueue,
+    JobResult,
     _PROVIDER_ACTIONS,
     _ROOT_ACTIONS,
+    _route_provider,
     action_allowed,
     action_argv,
     action_argv_from_options,
@@ -129,42 +130,78 @@ def test_discord_command_schema_descriptions_fit_the_platform_limit():
     assert sum(len(option.description) for option in fields) < 4_000
 
 
-def test_serial_command_runner_never_overlaps_work():
-    async def exercise() -> int:
-        runner = SerialCommandRunner()
-        active = 0
-        peak_active = 0
+def test_queue_serialises_a_provider_but_runs_providers_in_parallel():
+    import threading
+    import time as _time
 
-        async def fake_run(argv: list[str]) -> CommandResult:
-            nonlocal active, peak_active
-            active += 1
-            peak_active = max(peak_active, active)
-            await asyncio.sleep(0.01)
-            active -= 1
-            return CommandResult(tuple(argv), 0, "ok", False)
+    async def exercise() -> tuple[dict[str, int], int]:
+        queue = ExtractionQueue()
+        lock = threading.Lock()
+        per_provider_peak: dict[str, int] = {}
+        active_now = {"a": 0, "b": 0}
+        total_active = 0
+        cross_peak = 0
 
-        runner._run = fake_run  # type: ignore[method-assign]
-        first = asyncio.create_task(runner.submit(["status"]))
-        second = asyncio.create_task(runner.submit(["saucepan", "status"]))
-        await asyncio.gather(first, second)
-        await runner.close()
-        return peak_active
+        def make(provider: str):
+            def thunk() -> JobResult:
+                nonlocal total_active, cross_peak
+                with lock:
+                    active_now[provider] += 1
+                    total_active += 1
+                    per_provider_peak[provider] = max(
+                        per_provider_peak.get(provider, 0), active_now[provider]
+                    )
+                    cross_peak = max(cross_peak, total_active)
+                _time.sleep(0.05)
+                with lock:
+                    active_now[provider] -= 1
+                    total_active -= 1
+                return JobResult(True, provider)
 
-    assert asyncio.run(exercise()) == 1
+            return thunk
+
+        await asyncio.gather(
+            queue.run("a", make("a")),
+            queue.run("a", make("a")),
+            queue.run("b", make("b")),
+            queue.run("b", make("b")),
+        )
+        return per_provider_peak, cross_peak
+
+    per_provider_peak, cross_peak = asyncio.run(exercise())
+    assert per_provider_peak == {"a": 1, "b": 1}  # same provider never overlaps
+    assert cross_peak >= 2  # different providers ran at the same time
 
 
-def test_serial_command_runner_reports_queue_positions():
-    async def exercise() -> tuple[int, int]:
-        runner = SerialCommandRunner()
+def test_queue_reports_position_within_a_provider_lane():
+    async def exercise() -> list[int]:
+        queue = ExtractionQueue()
+        positions: list[int] = []
 
-        async def fake_run(argv: list[str]) -> CommandResult:
-            return CommandResult(tuple(argv), 0, "ok", False)
+        async def record(position: int) -> None:
+            positions.append(position)
 
-        runner._run = fake_run  # type: ignore[method-assign]
-        first_position, first = runner.enqueue(["status"])
-        second_position, second = runner.enqueue(["saucepan", "status"])
-        await asyncio.gather(first, second)
-        await runner.close()
-        return first_position, second_position
+        await asyncio.gather(
+            queue.run("clank", lambda: JobResult(True, ""), on_queued=record),
+            queue.run("clank", lambda: JobResult(True, ""), on_queued=record),
+            queue.run("clank", lambda: JobResult(True, ""), on_queued=record),
+        )
+        return sorted(positions)
 
-    assert asyncio.run(exercise()) == (1, 2)
+    assert asyncio.run(exercise()) == [1, 2, 3]
+
+
+def test_queue_allows_one_extraction_reservation_per_user():
+    queue = ExtractionQueue()
+    assert queue.reserve(7) is True
+    assert queue.reserve(7) is False  # second concurrent reservation is rejected
+    queue.release(7)
+    assert queue.reserve(7) is True  # freed once the first finishes
+
+
+def test_extract_urls_route_to_the_matching_provider_lane():
+    assert _route_provider("https://saucepan.ai/companion/abc") == "saucepan"
+    assert _route_provider("https://clank.world/chat/abc") == "clank"
+    assert _route_provider("https://spicychat.ai/chatbot/abc") == "spicychat"
+    # A bare JanitorAI UUID falls through to the browser-driven janitor lane.
+    assert _route_provider("fbe26f87-db0e-4a1b-9c2d-000000000000") == "janitor"

@@ -115,7 +115,7 @@ Run `rip COMMAND --help` for the full, colour-coded help of any command.
 | `rip clank …` | Rip characters from [clank.world](https://clank.world) via its API (no browser). See below. |
 | `rip spicychat …` | Rip characters from [spicychat.ai](https://spicychat.ai) via its API (no browser, no login). See below. |
 | `rip completion [SHELL]` | Print instructions to enable tab-completion. |
-| `rip discord-bot` | Serve the `/rip` Discord command gateway, executing one CLI command at a time. |
+| `rip discord-bot` | Serve the `/rip` Discord command gateway. Anyone in the guild can queue extractions; providers run in parallel and each person may have one extraction at a time. |
 
 ### Discord command bot
 
@@ -127,9 +127,10 @@ uv sync --extra discord
 uv run rip discord-bot
 ```
 
-Add `-v` for Discord gateway lifecycle and command-queue logs:
-`uv run --extra discord rip discord-bot -v`. Repeating it is safe for the
-Discord bot: raw Discord API payloads are never logged.
+Lifecycle and command-queue logs are on by default (INFO). Add `-v` for extra
+detail and `-vv` to also unmute discord.py's client log:
+`uv run --extra discord rip discord-bot -v`. Raw Discord API payloads are never
+logged at any level.
 
 The bot registers discoverable commands such as `/rip janitor extract`,
 `/rip saucepan list`, and `/rip clank status` in `DISCORD_GUILD_ID`. Select the
@@ -137,17 +138,27 @@ provider and action from Discord's command picker. Discord displays each
 action's typed inputs and CLI flags; `extract` actions require a `uuid` field
 (paste the UUID shown by a list/search result). Commands with no inputs show no
 placeholder fields. Only configured `DISCORD_ADMIN_IDS` may run `logout`.
-It runs `python -m ripart` directly (never through a shell), queues requests FIFO,
-and has exactly one worker, so browser profiles and saved provider sessions are
-never used in parallel. The channel shows queued/running/completed status,
-including PID, elapsed time, and CLI activity; the live output and long-output
-attachment stay private to the person who ran the command.
+
+Commands run **in-process** (never a subprocess), on a per-provider queue: jobs
+for the same provider run one at a time — so the shared JanitorAI browser
+profile and each provider's session are never used concurrently — while
+different providers extract in parallel. Anyone in the guild can submit, but
+each person may have only **one extraction** queued or running at once (quick
+read-only commands like `status`/`list` are exempt). The channel shows a
+queued (with position in the provider's lane) → running (elapsed) → completed
+status; the CLI output and any long-output attachment stay private to the
+person who ran the command.
 
 Any member of the configured guild can use the commands (or only members in
 `DISCORD_COMMAND_CHANNEL_ID` when that optional channel restriction is set).
-Set `DISCORD_CLI_TIMEOUT_SECONDS` to change the per-command limit (default:
-900). All provider `logout` actions are restricted to the comma-separated
-Discord user IDs in `DISCORD_ADMIN_IDS`.
+All provider `logout` actions are restricted to the comma-separated Discord
+user IDs in `DISCORD_ADMIN_IDS`.
+
+Because commands run in-process, a JanitorAI (Botasaurus) extraction now drives
+the browser inside the bot process rather than an isolated subprocess — a
+browser crash can affect the bot. There is no hard per-command kill-timeout (a
+worker thread can't be force-killed); a wedged provider stalls only its own
+lane, bounded in practice by the providers' own HTTP/browser timeouts.
 
 ### Open archives (chub.ai, character-tavern, any card file)
 

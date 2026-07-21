@@ -1,10 +1,11 @@
 """Guild-scoped Discord slash-command gateway for the RIPart CLI.
 
-This module intentionally does not expose a shell.  Discord supplies a command
-line which is parsed with :mod:`shlex` and executed as ``python -m ripart``;
-therefore metacharacters, redirects, and command substitution never run.
-Commands are processed by one FIFO worker so browser profiles and provider
-sessions cannot be used concurrently.
+Each slash command maps to a RIPart CLI command and runs **in-process** on a
+worker thread (never a subprocess) via :class:`ExtractionQueue`. The queue keeps
+one lock per provider, so jobs for the same provider run one at a time — sharing
+the browser profile and the providers' module-level trace state safely — while
+different providers extract in parallel. Anyone in the guild may submit, but
+each person may have only one extraction queued or running at a time.
 """
 
 from __future__ import annotations
@@ -16,21 +17,17 @@ import io
 import inspect
 import logging
 import os
-import re
 import shlex
-import sys
+import threading
 import time
 from typing import Any, Awaitable, Callable, Literal
 from dataclasses import dataclass
-from pathlib import Path
 
 import click
 
 from .discord_forum import _load_env
 
-_ROOT = Path(__file__).resolve().parent.parent
-_MAX_OUTPUT_BYTES = 1_000_000
-_DEFAULT_TIMEOUT_SECONDS = 900
+_INLINE_OUTPUT_LIMIT = 1_500  # longer results are sent as a file attachment instead
 _LOG = logging.getLogger(__name__)
 
 # Keep the Discord command picker aligned with every user-facing RIPart CLI
@@ -78,25 +75,11 @@ _PROVIDER_ACTIONS: dict[str, dict[str, str]] = {
 
 
 @dataclass(frozen=True)
-class CommandResult:
-    """The bounded, combined output from one child CLI process."""
+class JobResult:
+    """The captured outcome of one in-process CLI command."""
 
-    argv: tuple[str, ...]
-    returncode: int
-    output: str
-    truncated: bool
-
-
-@dataclass(frozen=True)
-class CommandProgress:
-    """A lifecycle or output update from the serial CLI worker."""
-
-    state: Literal["started", "output"]
-    pid: int | None = None
-    output: str = ""
-
-
-ProgressCallback = Callable[[CommandProgress], Awaitable[None]]
+    ok: bool
+    text: str
 
 
 @dataclass(frozen=True)
@@ -256,133 +239,125 @@ def action_allowed(*, action: str, user_id: int, admin_ids: set[int]) -> bool:
     return action != "logout" or user_id in admin_ids
 
 
-class SerialCommandRunner:
-    """Run CLI child processes strictly one at a time in submission order."""
+# --------------------------------------------------------------------------- #
+# In-process command execution
+#
+# Commands run as Python in a worker thread (never a subprocess), so several
+# providers extract in parallel within one process. ``ripart.cli`` prints
+# through module-level ``console``/``err_console``; we wrap those with a
+# thread-local proxy so each worker thread captures its own output instead of
+# interleaving on one shared stdout.
+# --------------------------------------------------------------------------- #
 
-    def __init__(self, *, timeout_seconds: int = _DEFAULT_TIMEOUT_SECONDS) -> None:
-        self.timeout_seconds = timeout_seconds
-        self._queue: asyncio.Queue[
-            tuple[list[str], asyncio.Future[CommandResult], ProgressCallback | None]
-        ] = asyncio.Queue()
-        self._worker: asyncio.Task[None] | None = None
-        self._active = False
+_capture = threading.local()
 
-    def start(self) -> None:
-        if self._worker is None:
-            self._worker = asyncio.create_task(self._work(), name="ripart-discord-cli")
 
-    async def close(self) -> None:
-        if self._worker is None:
-            return
-        self._worker.cancel()
+class _ProxyConsole:
+    """Route ``ripart.cli`` console output to this thread's capture buffer."""
+
+    def __init__(self, base: object, stream: str) -> None:
+        self._base = base
+        self._stream = stream
+
+    def _target(self) -> object:
+        pair = getattr(_capture, "pair", None)
+        return self._base if pair is None else pair[self._stream]
+
+    def __getattr__(self, name: str) -> object:
+        # ``print`` and any other Console attribute resolve against the target
+        # active on the calling thread (base console outside a capture block).
+        return getattr(self._target(), name)
+
+
+def _install_console_proxies() -> None:
+    """Make ``ripart.cli``'s consoles thread-local so parallel jobs don't mix."""
+    import ripart.cli as cli
+
+    if not isinstance(cli.console, _ProxyConsole):
+        cli.console = _ProxyConsole(cli.console, "out")
+        cli.err_console = _ProxyConsole(cli.err_console, "err")
+
+
+def _run_command(argv: list[str]) -> JobResult:
+    """Run one RIPart CLI command in-process, capturing its output as text."""
+    import ripart.cli as cli
+    from rich.console import Console
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=False, no_color=True, width=100, highlight=False)
+    _capture.pair = {"out": console, "err": console}
+    code = 0
+    try:
+        cli.main.main(args=list(argv), prog_name="rip", standalone_mode=False)
+    except SystemExit as exc:
+        code = 0 if exc.code in (0, None) else exc.code if isinstance(exc.code, int) else 1
+    except Exception as exc:  # noqa: BLE001 - backstop; RipGroup already reports most errors
+        code = 1
+        console.print(f"error: {exc}")
+    finally:
+        _capture.pair = None
+    text = buffer.getvalue().strip() or "(no output)"
+    return JobResult(code == 0, text)
+
+
+class ExtractionQueue:
+    """Serialise commands per provider while running providers in parallel.
+
+    Each provider has its own lock, so jobs for the same provider run one at a
+    time (protecting the shared browser profile and the providers' module-level
+    trace state) while different providers proceed concurrently. Extractions are
+    limited to one in flight per person via :meth:`reserve`.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._counts: dict[str, int] = {}
+        self._active_users: set[int] = set()
+
+    def reserve(self, user_id: int) -> bool:
+        """Claim this user's single extraction slot; ``False`` if already taken."""
+        if user_id in self._active_users:
+            return False
+        self._active_users.add(user_id)
+        return True
+
+    def release(self, user_id: int) -> None:
+        self._active_users.discard(user_id)
+
+    def _lock(self, provider: str) -> asyncio.Lock:
+        lock = self._locks.get(provider)
+        if lock is None:
+            lock = self._locks[provider] = asyncio.Lock()
+        return lock
+
+    async def run(
+        self,
+        provider: str,
+        thunk: Callable[[], JobResult],
+        *,
+        on_queued: Callable[[int], Awaitable[None]] | None = None,
+        on_start: Callable[[], Awaitable[None]] | None = None,
+    ) -> JobResult:
+        """Run ``thunk`` in a worker thread, serialised behind ``provider``.
+
+        ``on_queued`` is called with this job's 1-based position in the
+        provider's line; ``on_start`` fires once it actually begins running.
+        """
+        position = self._counts.get(provider, 0) + 1
+        self._counts[provider] = position
+        if on_queued is not None:
+            await on_queued(position)
         try:
-            await self._worker
-        except asyncio.CancelledError:
-            pass
-        self._worker = None
-
-    def enqueue(
-        self, argv: list[str], *, progress: ProgressCallback | None = None
-    ) -> tuple[int, asyncio.Future[CommandResult]]:
-        """Queue work and return its one-based position plus completion future."""
-        self.start()
-        future: asyncio.Future[CommandResult] = asyncio.get_running_loop().create_future()
-        position = self._queue.qsize() + (1 if self._active else 0) + 1
-        self._queue.put_nowait((argv, future, progress))
-        return position, future
-
-    async def submit(self, argv: list[str]) -> CommandResult:
-        """Queue one command and return its result once the worker reaches it."""
-        _position, future = self.enqueue(argv)
-        return await future
-
-    async def _work(self) -> None:
-        while True:
-            argv, future, progress = await self._queue.get()
-            self._active = True
-            try:
-                result = (
-                    await self._run(argv, progress=progress)
-                    if progress is not None
-                    else await self._run(argv)
-                )
-                if not future.cancelled():
-                    future.set_result(result)
-            except Exception as exc:  # noqa: BLE001 - surface runner failure to caller
-                if not future.cancelled():
-                    future.set_exception(exc)
-            finally:
-                self._active = False
-                self._queue.task_done()
-
-    async def _notify(
-        self, progress: ProgressCallback | None, update: CommandProgress
-    ) -> None:
-        """Send a best-effort UI update without letting Discord affect the CLI."""
-        if progress is None:
-            return
-        try:
-            await progress(update)
-        except Exception:  # noqa: BLE001 - progress delivery must not abort work
-            _LOG.warning("Unable to deliver Discord command progress", exc_info=True)
-
-    async def _run(
-        self, argv: list[str], *, progress: ProgressCallback | None = None
-    ) -> CommandResult:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-m",
-            "ripart",
-            *argv,
-            cwd=_ROOT,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            env=_child_env(),
-        )
-        await self._notify(progress, CommandProgress("started", pid=process.pid))
-
-        output_parts: list[bytes] = []
-        output_size = 0
-        retained_size = 0
-
-        async def read_output() -> None:
-            nonlocal output_size, retained_size
-            assert process.stdout is not None
-            while chunk := await process.stdout.read(4_096):
-                output_size += len(chunk)
-                if retained_size < _MAX_OUTPUT_BYTES:
-                    remaining = _MAX_OUTPUT_BYTES - retained_size
-                    retained = chunk[:remaining]
-                    output_parts.append(retained)
-                    retained_size += len(retained)
-                await self._notify(
-                    progress,
-                    CommandProgress("output", output=chunk.decode("utf-8", errors="replace")),
-                )
-
-        output_task = asyncio.create_task(read_output(), name="ripart-discord-cli-output")
-        try:
-            await asyncio.wait_for(process.wait(), timeout=self.timeout_seconds)
-            await output_task
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            await output_task
-            return CommandResult(
-                tuple(argv),
-                124,
-                f"command exceeded the {self.timeout_seconds}-second limit",
-                False,
-            )
-        except asyncio.CancelledError:
-            process.kill()
-            await process.wait()
-            await output_task
-            raise
-        output_bytes = b"".join(output_parts)
-        truncated = output_size > _MAX_OUTPUT_BYTES
-        output = output_bytes.decode("utf-8", errors="replace")
-        return CommandResult(tuple(argv), process.returncode or 0, output, truncated)
+            async with self._lock(provider):
+                if on_start is not None:
+                    await on_start()
+                # ponytail: a worker thread can't be force-killed like a
+                # subprocess, so there's no hard queue timeout — a wedged
+                # provider stalls only its own lane. Provider HTTP/browser
+                # timeouts bound this in practice.
+                return await asyncio.to_thread(thunk)
+        finally:
+            self._counts[provider] -= 1
 
 
 def _env_int(name: str, *, required: bool = False) -> int | None:
@@ -408,28 +383,25 @@ def _admin_user_ids() -> set[int]:
     return admin_ids
 
 
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+def _route_provider(url: str) -> str:
+    """Map an ``extract <url>`` target to the provider lane that will handle it.
 
-
-def _child_env() -> dict[str, str]:
-    """Force plain, unbuffered CLI output so captured text renders cleanly in Discord.
-
-    ``NO_COLOR``/``TERM`` stop Rich from emitting ANSI styling into the pipe,
-    ``COLUMNS`` keeps table wrapping readable, and ``PYTHONUNBUFFERED`` makes the
-    child flush line-by-line so the live-progress tail actually updates.
+    Mirrors the URL routing in ``ripart.cli.extract`` so the queue serialises a
+    job behind the same provider the CLI would actually use.
     """
-    return {
-        **os.environ,
-        "NO_COLOR": "1",
-        "TERM": "dumb",
-        "COLUMNS": "80",
-        "PYTHONUNBUFFERED": "1",
-    }
+    from ..providers import chub as cb, clank as ck, saucepan as sp, spicychat as sc, tavern as tv
 
-
-def _clean_output(text: str) -> str:
-    """Strip stray terminal escape codes and trailing whitespace from CLI output."""
-    return _ANSI_RE.sub("", text).strip()
+    if ck.is_clank_url(url):
+        return "clank"
+    if sp.is_saucepan_url(url):
+        return "saucepan"
+    if sc.is_spicychat_url(url):
+        return "spicychat"
+    if tv.is_card_url(url):
+        return "tavern"
+    if cb.is_chub_url(url):
+        return "chub"
+    return "janitor"
 
 
 def _configure_logging(verbose: int) -> None:
@@ -461,9 +433,6 @@ def run_discord_bot(*, verbose: int = 0) -> None:
     guild_id = _env_int("DISCORD_GUILD_ID", required=True)
     channel_id = _env_int("DISCORD_COMMAND_CHANNEL_ID")
     admin_ids = _admin_user_ids()
-    timeout = int(os.environ.get("DISCORD_CLI_TIMEOUT_SECONDS", _DEFAULT_TIMEOUT_SECONDS))
-    if timeout < 1:
-        raise RuntimeError("DISCORD_CLI_TIMEOUT_SECONDS must be positive")
 
     try:
         import discord
@@ -474,8 +443,9 @@ def run_discord_bot(*, verbose: int = 0) -> None:
         ) from exc
 
     _configure_logging(verbose)
+    _install_console_proxies()
 
-    runner = SerialCommandRunner(timeout_seconds=timeout)
+    queue = ExtractionQueue()
     guild = discord.Object(id=guild_id)
 
     class RipDiscordClient(discord.Client):
@@ -490,15 +460,10 @@ def run_discord_bot(*, verbose: int = 0) -> None:
         async def setup_hook(self) -> None:
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
-            runner.start()
             _LOG.info(
-                "gateway ready as %s — guild %s, channel %s, %d admin(s), %ds timeout",
-                self.user, guild_id, channel_id or "any", len(admin_ids), timeout,
+                "gateway ready as %s — guild %s, channel %s, %d admin(s)",
+                self.user, guild_id, channel_id or "any", len(admin_ids),
             )
-
-        async def close(self) -> None:
-            await runner.close()
-            await super().close()
 
     client = RipDiscordClient()
 
@@ -508,7 +473,9 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             embed.add_field(name=name, value=value, inline=True)
         return embed
 
-    async def dispatch(interaction, argv: list[str], *, command_label: str) -> None:
+    async def dispatch(
+        interaction, argv: list[str], *, command_label: str, provider: str, is_extraction: bool
+    ) -> None:
         if interaction.guild_id != guild_id or (
             channel_id is not None and interaction.channel_id != channel_id
         ):
@@ -516,112 +483,116 @@ def run_discord_bot(*, verbose: int = 0) -> None:
                 "⛔ This command isn't available in this channel.", ephemeral=True
             )
             return
-        await interaction.response.defer(thinking=True)
+        title = f"rip {command_label}"
+        user_id = interaction.user.id
+        # One extraction per person; quick read-only commands are exempt.
+        if is_extraction and not queue.reserve(user_id):
+            await interaction.response.send_message(
+                embed=_embed(
+                    title,
+                    "⛔ You already have an extraction queued or running.\n"
+                    "Only one per person — wait for it to finish.",
+                    discord.Color.red(),
+                ),
+                ephemeral=True,
+            )
+            return
+
         # The public status never shows CLI output or the argument values (which
         # may carry secrets, e.g. a login password); only the requester sees the
-        # captured output, in the ephemeral message below.
-        title = f"rip {command_label}"
+        # captured output, in the ephemeral follow-up below.
         started_at: float | None = None
-        last_output_at: float | None = None
-        pid: int | None = None
-        output_tail = ""
         finished = asyncio.Event()
 
-        async def on_progress(update: CommandProgress) -> None:
-            nonlocal started_at, last_output_at, output_tail, pid
-            if update.state == "started":
-                started_at = time.monotonic()
-                pid = update.pid
-            elif update.output:
-                last_output_at = time.monotonic()
-                output_tail = _clean_output(output_tail + update.output)[-1_500:]
+        async def on_queued(position: int) -> None:
+            note = (
+                "Starting now…" if position == 1
+                else f"Queued — position {position} in the **{provider}** lane."
+            )
+            await interaction.edit_original_response(
+                embed=_embed(title, f"⌛ {note}", discord.Color.blurple())
+            )
 
-        position, result_future = runner.enqueue(argv, progress=on_progress)
-        _LOG.info(
-            "queued `%s` for %s (%s) — position %d",
-            command_label, interaction.user, interaction.user.id, position,
-        )
-        queued = "Starting now…" if position == 1 else f"Queued — position {position} in line."
-        await interaction.edit_original_response(
-            embed=_embed(title, f"⌛ {queued}", discord.Color.blurple())
-        )
-        live = await interaction.followup.send(
-            embed=_embed(title, "Waiting for the serial worker…", discord.Color.blurple()),
-            ephemeral=True, wait=True,
-        )
+        async def on_start() -> None:
+            nonlocal started_at
+            started_at = time.monotonic()
+            finished.clear()
+            await interaction.edit_original_response(
+                embed=_embed(title, "▶ Running", discord.Color.gold())
+            )
+            refresh_tasks.append(
+                asyncio.create_task(refresh_status(), name="ripart-discord-status")
+            )
+
+        refresh_tasks: list[asyncio.Task] = []
 
         async def refresh_status() -> None:
-            """Render process activity at a rate Discord comfortably accepts."""
+            """Tick the elapsed timer while the job runs, at a Discord-safe rate."""
             while not finished.is_set():
-                if started_at is not None:
-                    elapsed = int(time.monotonic() - started_at)
-                    fields = [("Elapsed", f"{elapsed}s")]
-                    if pid is not None:
-                        fields.append(("PID", str(pid)))
-                    if last_output_at is not None:
-                        fields.append(("Last output", f"{int(time.monotonic() - last_output_at)}s ago"))
-                    try:
-                        await interaction.edit_original_response(
-                            embed=_embed(title, "▶ Running", discord.Color.gold(), fields)
-                        )
-                        if output_tail:
-                            await live.edit(
-                                embed=_embed(
-                                    title, f"▶ Running\n```\n{output_tail}\n```", discord.Color.gold()
-                                )
-                            )
-                    except Exception:  # noqa: BLE001 - CLI work must stay independent of UI edits
-                        _LOG.warning("Unable to refresh Discord command status", exc_info=True)
                 try:
-                    await asyncio.wait_for(finished.wait(), timeout=2)
+                    await asyncio.wait_for(finished.wait(), timeout=3)
+                    return
                 except asyncio.TimeoutError:
                     pass
+                elapsed = int(time.monotonic() - started_at) if started_at else 0
+                with contextlib.suppress(Exception):  # UI edits never affect the job
+                    await interaction.edit_original_response(
+                        embed=_embed(title, "▶ Running", discord.Color.gold(), [("Elapsed", f"{elapsed}s")])
+                    )
 
-        refresh_task = asyncio.create_task(refresh_status(), name="ripart-discord-status")
+        _LOG.info(
+            "queued `%s` for %s (%s) [lane=%s]",
+            command_label, interaction.user, user_id, provider,
+        )
+        result: JobResult
         try:
-            result = await result_future
+            await interaction.response.defer(thinking=True)
+            result = await queue.run(
+                provider, lambda: _run_command(argv), on_queued=on_queued, on_start=on_start
+            )
+        except Exception as exc:  # noqa: BLE001 - never let one job crash the gateway
+            _LOG.exception("job `%s` crashed", command_label)
+            result = JobResult(False, f"internal error: {exc}")
         finally:
             finished.set()
-            refresh_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await refresh_task
+            for task in refresh_tasks:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            if is_extraction:
+                queue.release(user_id)
 
-        duration = int(time.monotonic() - started_at) if started_at is not None else 0
-        ok = result.returncode == 0
+        duration = int(time.monotonic() - started_at) if started_at else 0
         _LOG.info(
-            "finished `%s` for %s — exit %d in %ds%s",
-            command_label, interaction.user, result.returncode, duration,
-            " (output truncated)" if result.truncated else "",
+            "finished `%s` for %s — %s in %ds",
+            command_label, interaction.user, "ok" if result.ok else "fail", duration,
         )
-        status = "✅ Completed" if ok else f"❌ Failed — exit {result.returncode}"
-        color = discord.Color.green() if ok else discord.Color.red()
+        status = "✅ Completed" if result.ok else "❌ Failed"
+        color = discord.Color.green() if result.ok else discord.Color.red()
         await interaction.edit_original_response(
             embed=_embed(title, status, color, [("Duration", f"{duration}s")])
         )
 
-        output = _clean_output(result.output) or "(no output)"
+        output = result.text or "(no output)"
         result_embed = _embed(title, status, color, [("Duration", f"{duration}s")])
-        attachment = None
-        if len(output) > 1_500 or result.truncated:
+        if len(output) > _INLINE_OUTPUT_LIMIT:
             result_embed.add_field(name="Output", value="Attached as `rip-output.txt`.", inline=False)
-            if result.truncated:
-                result_embed.set_footer(text="Output capped at 1 MiB.")
-            attachment = discord.File(
-                io.BytesIO(result.output.encode("utf-8")), filename="rip-output.txt"
+            await interaction.followup.send(
+                embed=result_embed,
+                file=discord.File(io.BytesIO(output.encode("utf-8")), filename="rip-output.txt"),
+                ephemeral=True,
             )
         else:
             result_embed.description = f"{status}\n```\n{output}\n```"
-
-        await live.edit(embed=result_embed)
-        if attachment is not None:
-            await interaction.followup.send(file=attachment, ephemeral=True)
+            await interaction.followup.send(embed=result_embed, ephemeral=True)
 
     rip_group = app_commands.Group(
-        name="rip", description="Run RIPart actions serially (one at a time)."
+        name="rip", description="Queue RIPart actions — providers run in parallel."
     )
 
     def add_action(parent, *, prefix: tuple[str, ...], action: str, description: str) -> None:
         fields = action_options(prefix, action)
+        is_extraction = action == "extract"
 
         async def callback(interaction, **values) -> None:
             if not action_allowed(
@@ -636,7 +607,21 @@ def run_discord_bot(*, verbose: int = 0) -> None:
             except ValueError as exc:
                 await interaction.response.send_message(str(exc), ephemeral=True)
                 return
-            await dispatch(interaction, argv, command_label=" ".join((*prefix, action)))
+            # Provider lane: a provider group serialises on its own name; a
+            # root `extract` is routed by its URL to the same lane the CLI uses.
+            if prefix:
+                provider = prefix[0]
+            elif is_extraction:
+                provider = _route_provider(str(values.get("uuid") or ""))
+            else:
+                provider = "misc"
+            await dispatch(
+                interaction,
+                argv,
+                command_label=" ".join((*prefix, action)),
+                provider=provider,
+                is_extraction=is_extraction,
+            )
 
         callback.__name__ = f"{('_'.join(prefix) or 'root')}_{action}".replace("-", "_")
         callback.__signature__ = inspect.Signature(  # type: ignore[attr-defined]

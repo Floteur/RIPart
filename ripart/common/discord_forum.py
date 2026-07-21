@@ -22,6 +22,7 @@ a rip.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -30,12 +31,13 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from dotenv import dotenv_values, find_dotenv
 
 from .cards import build_character_book
 
-# Project root (parent of this ``common/`` package) — where ``.env`` lives.
-_ROOT = Path(__file__).resolve().parent.parent
-_ENV_PATH = _ROOT / ".env"
+# Repository root, used as a reliable fallback when the CLI is launched from
+# elsewhere (for example through an installed console script).
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 _API = "https://discord.com/api/v10"
 _UA = "ripart (https://github.com/, forum-archiver)"
@@ -106,29 +108,40 @@ _CONTENT_TAGS: dict[str, str] = {
 }
 
 
-def _load_env() -> None:
-    """Read simple ``KEY=value`` lines from ``.env`` into ``os.environ`` (once).
+def _env_paths() -> tuple[Path, ...]:
+    """Return applicable dotenv files, in precedence order.
 
-    Only fills keys that are not already set, and only parses ``KEY=value`` lines
-    so the pre-existing ``user:`` / ``pass:`` (colon-style) JanitorAI lines are
-    left untouched. Idempotent and dependency-free (no python-dotenv).
+    A nearby file found from the invocation directory takes precedence over the
+    repository file. Duplicate paths are collapsed when RIPart runs from its
+    checkout root.
+    """
+    paths: list[Path] = []
+    if found := find_dotenv(usecwd=True):
+        paths.append(Path(found))
+    paths.append(_PROJECT_ROOT / ".env")
+    return tuple(dict.fromkeys(path.resolve() for path in paths if path.is_file()))
+
+
+def _load_env() -> None:
+    """Load configuration from nearby and project ``.env`` files once.
+
+    Existing environment variables are never overwritten. This lets deployment
+    secrets override local files while supporting both a caller's directory and
+    the repository checkout.
     """
     if os.environ.get("_RIPART_ENV_LOADED"):
         return
     os.environ["_RIPART_ENV_LOADED"] = "1"
-    try:
-        text = _ENV_PATH.read_text(encoding="utf-8")
-    except OSError:
-        return
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        if key and key not in os.environ:
-            os.environ[key] = value
+    for path in _env_paths():
+        # Some existing RIPart .env files also hold Janitor credentials as
+        # ``user:``/``pass:`` lines. They are not dotenv syntax, so filter them
+        # before handing the standard assignments to python-dotenv.
+        assignments = "\n".join(
+            line for line in path.read_text(encoding="utf-8").splitlines() if "=" in line
+        )
+        for key, value in dotenv_values(stream=io.StringIO(assignments)).items():
+            if key and value is not None:
+                os.environ.setdefault(key, value)
 
 
 def _platform_of(url: str) -> str | None:
