@@ -1825,76 +1825,91 @@ def _extract_character(
         trigger_passes: list[dict[str, Any]] = []
         full_payload = probe_payload
 
-        for index, trigger_text in enumerate(trigger_messages):
-            label = "full" if index == 0 else f"trigger-{index + 1}"
-            _clog(
-                f"lorebook trigger pass {index + 1}/{len(trigger_messages)} "
-                f"({len(trigger_text)} chars)"
-            )
-            try:
-                payload = _generate(trigger_text, label=label)
-            except Exception as exc:
-                _clog(f"warning: pass {index + 1} failed, skipping: {exc}")
-                continue
-            full_payload = payload
-            separated_pass = separate(payload, card, public_contents)
-            separations.append(separated_pass)
-            trigger_passes.append(
-                {
-                    "index": index + 1,
-                    "chars": len(trigger_text),
-                    "entriesFound": len(separated_pass.get("entries") or []),
-                    "loreChars": len(separated_pass.get("lorebookText") or ""),
-                }
-            )
-
-        if not separations:
-            separations.append(separate(probe_payload, card, public_contents))
-            trigger_passes.append(
-                {
-                    "index": 0,
-                    "chars": 0,
-                    "entriesFound": len(separations[0].get("entries") or []),
-                    "loreChars": len(separations[0].get("lorebookText") or ""),
-                    "fallback": "probe",
-                }
-            )
-
-        separated = merge_separated_results(separations)
-
-        # The broad passes recover text but cannot reveal which portion of a
-        # long message activated it.  Optionally replay narrow, one-candidate
-        # prompts and retain only candidates whose fresh response injects the
-        # corresponding recovered block.
-        probe_separated = separate(probe_payload, card, public_contents)
-        recovered_constants = {
-            _norm(entry) for entry in probe_separated.get("entries") or [] if _norm(entry)
-        }
-        recovered_triggers: dict[str, list[str]] = {}
-        searchable_entries = [
-            entry for entry in separated["entries"] if _norm(entry) not in recovered_constants
-        ]
-        if find_triggers and searchable_entries:
-            candidates = build_trigger_search_messages(searchable_entries)[
-                :max_trigger_search_passes
-            ]
-            known_entries = {
-                _norm(entry): entry for entry in separated["entries"] if _norm(entry)
-            }
-            _clog(f"testing {len(candidates)} candidate lorebook triggers")
-            for index, (candidate, trigger_text) in enumerate(candidates, 1):
+        if has_lorebook:
+            for index, trigger_text in enumerate(trigger_messages):
+                label = "full" if index == 0 else f"trigger-{index + 1}"
+                _clog(
+                    f"lorebook trigger pass {index + 1}/{len(trigger_messages)} "
+                    f"({len(trigger_text)} chars)"
+                )
                 try:
-                    payload = _generate(
-                        trigger_text, label=f"trigger-search-{index}"
-                    )
+                    payload = _generate(trigger_text, label=label)
                 except Exception as exc:
-                    _clog(f"warning: trigger search {index} failed, skipping: {exc}")
+                    _clog(f"warning: pass {index + 1} failed, skipping: {exc}")
                     continue
-                found = separate(payload, card, public_contents).get("entries") or []
-                found_keys = {_norm(entry) for entry in found}
-                for entry_key in known_entries:
-                    if entry_key in found_keys:
-                        recovered_triggers.setdefault(entry_key, []).append(candidate)
+                full_payload = payload
+                separated_pass = separate(payload, card, public_contents)
+                separations.append(separated_pass)
+                trigger_passes.append(
+                    {
+                        "index": index + 1,
+                        "chars": len(trigger_text),
+                        "entriesFound": len(separated_pass.get("entries") or []),
+                        "loreChars": len(separated_pass.get("lorebookText") or ""),
+                    }
+                )
+
+            if not separations:
+                separations.append(separate(probe_payload, card, public_contents))
+                trigger_passes.append(
+                    {
+                        "index": 0,
+                        "chars": 0,
+                        "entriesFound": len(separations[0].get("entries") or []),
+                        "loreChars": len(separations[0].get("lorebookText") or ""),
+                        "fallback": "probe",
+                    }
+                )
+
+            separated = merge_separated_results(separations)
+
+            # The broad passes recover text but cannot reveal which portion of a
+            # long message activated it.  Optionally replay narrow, one-candidate
+            # prompts and retain only candidates whose fresh response injects the
+            # corresponding recovered block.
+            probe_separated = separate(probe_payload, card, public_contents)
+            recovered_constants = {
+                _norm(entry)
+                for entry in probe_separated.get("entries") or []
+                if _norm(entry)
+            }
+            recovered_triggers: dict[str, list[str]] = {}
+            searchable_entries = [
+                entry
+                for entry in separated["entries"]
+                if _norm(entry) not in recovered_constants
+            ]
+            candidates: list[tuple[str, str]] = []
+            if find_triggers and searchable_entries:
+                candidates = build_trigger_search_messages(searchable_entries)[
+                    :max_trigger_search_passes
+                ]
+                known_entries = {
+                    _norm(entry): entry for entry in separated["entries"] if _norm(entry)
+                }
+                _clog(f"testing {len(candidates)} candidate lorebook triggers")
+                for index, (candidate, trigger_text) in enumerate(candidates, 1):
+                    try:
+                        payload = _generate(
+                            trigger_text, label=f"trigger-search-{index}"
+                        )
+                    except Exception as exc:
+                        _clog(f"warning: trigger search {index} failed, skipping: {exc}")
+                        continue
+                    found = separate(payload, card, public_contents).get("entries") or []
+                    found_keys = {_norm(entry) for entry in found}
+                    for entry_key in known_entries:
+                        if entry_key in found_keys:
+                            recovered_triggers.setdefault(entry_key, []).append(candidate)
+        else:
+            # A generateAlpha echo contains the full assembled prompt. Without
+            # an attached script there is no evidence that text outside the card
+            # wrappers is lorebook content, so keep it in the card only.
+            separated = {"lorebookText": "", "entries": []}
+            recovered_constants = set()
+            recovered_triggers = {}
+            searchable_entries = []
+            candidates = []
 
         avatar_base64 = _await_avatar_download(driver)
         character = build_character(meta, full_payload, avatar_base64, card)

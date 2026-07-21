@@ -145,7 +145,7 @@ def _discord_type(parameter: click.Parameter) -> object:
 def _argument_description(parameter: click.Argument, *, is_extract_uuid: bool) -> str:
     """Use compact descriptions: Discord caps the complete command tree at 8 KiB."""
     if is_extract_uuid:
-        return "Character UUID from a list/search result."
+        return "Character UUID or full page URL (a pasted URL is parsed for you)."
     return {
         "path": "Local session-file path.",
         "query": "Search text.",
@@ -171,11 +171,7 @@ def action_options(prefix: tuple[str, ...], action: str) -> tuple[ActionOption, 
                 ActionOption(
                     name="uuid" if is_extract_uuid else parameter.name,
                     annotation=str,
-                    description=(
-                        "Character UUID from a list/search result."
-                        if is_extract_uuid
-                        else _argument_description(parameter, is_extract_uuid=False)
-                    ),
+                    description=_argument_description(parameter, is_extract_uuid=is_extract_uuid),
                     required=parameter.required,
                     positional=True,
                 )
@@ -449,6 +445,9 @@ def _configure_logging(verbose: int) -> None:
     logging.getLogger("discord.webhook").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.INFO if verbose > 1 else logging.WARNING)
+    # jurigged's --reload file watcher (watchdog) logs one raw inotify event per
+    # file in the tree at DEBUG — a flood that has nothing to do with the bot.
+    logging.getLogger("watchdog").setLevel(logging.WARNING)
 
 
 def run_discord_bot(*, verbose: int = 0) -> None:

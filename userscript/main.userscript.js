@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Datacat Bulk JanitorAI Character Retriever
 // @namespace    https://greasyfork.org/users/1622561-flonz
-// @version      1.5.0
+// @version      1.5.1
 // @description  Collect character UUIDs from JanitorAI pages and bulk-retrieve them through Datacat with retries, persistence, and result export.
 // @author       Flo
 // @license      MIT
@@ -37,7 +37,7 @@
     pageWindow.__datacatJanitorToolsLoaded = true;
     pageWindow.__datacatBulkRetrieverLoaded = true;
 
-    const SCRIPT_VERSION = "1.5.0";
+    const SCRIPT_VERSION = "1.5.1";
     const UUID_PATTERN =
         /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     const JANITOR_COLLECTOR_STORAGE_KEY = "datacat_janitor_uuid_collector_v1";
@@ -281,6 +281,7 @@
                 panel.style.top = `${Math.max(0, savedPosition.top)}px`;
             }
             refreshOutput();
+            syncFromPeers();
             publishJanitorIds(collectedIds);
             scanPage();
         };
@@ -347,8 +348,10 @@
             publishJanitorIds(collectedIds);
         }
 
-        GM_addValueChangeListener(janitorRevisionKey, (_key, _old, _value, remote) => {
-            if (!remote) return;
+        // Merge in every active Janitor tab's collected IDs. Called on mount (a
+        // fresh tab must pull peers that have nothing new to trigger a republish)
+        // and on every peer publish.
+        function syncFromPeers() {
             let changed = false;
             for (const id of activeJanitorIds()) {
                 if (!collectedIds.has(id)) {
@@ -360,6 +363,11 @@
                 persistCollectorState();
                 refreshOutput();
             }
+            return changed;
+        }
+
+        GM_addValueChangeListener(janitorRevisionKey, (_key, _old, _value, remote) => {
+            if (remote) syncFromPeers();
         });
 
         function scanPage({ refreshWhenUnchanged = false } = {}) {
