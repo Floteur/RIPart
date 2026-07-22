@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+
 from ripart.providers.janitor import browser_tasks
 
 
@@ -35,6 +37,22 @@ def test_generate_summaries_report_shape_without_payload_content():
     error = str(browser_tasks.GenerateAlphaError(500, "private upstream response"))
     assert error == "generateAlpha failed: HTTP 500 response_bytes=25"
     assert "private upstream response" not in error
+
+
+def test_write_generate_dump_captures_query_answer_and_http_stats():
+    fh = io.StringIO()
+    body = {"chatMessages": [{"role": "user", "message": "trigger text"}]}
+    payload = {"messages": [{"content": "recovered lore"}]}
+    browser_tasks._write_generate_dump(
+        fh, "char-1", "probe", 200, 123.0, body, "raw sse body", payload
+    )
+    out = fh.getvalue()
+    # everything the --dump flag promises: query, raw + parsed answer, HTTP stats
+    assert "trigger text" in out
+    assert "raw sse body" in out
+    assert "recovered lore" in out
+    assert "HTTP 200" in out
+    assert "response_bytes=12" in out  # len("raw sse body")
 
 
 def test_trigger_search_matches_exclude_always_active_baseline_entries():

@@ -1121,6 +1121,47 @@ def _generate_response_summary(payload: dict[str, Any]) -> str:
     )
 
 
+def _write_generate_dump(
+    fh,
+    character_id: str,
+    label: str,
+    status: int,
+    elapsed_ms: float,
+    body: dict[str, Any],
+    raw_response: str,
+    payload: dict[str, Any] | None,
+) -> None:
+    """Append one full generateAlpha call to the --dump debug file.
+
+    Unlike the verbose logs (shapes only), this writes the actual query text,
+    the raw HTTP response body, and the parsed content, so parsing/retrieval
+    can be diagnosed and improved offline.
+    """
+    messages = body.get("chatMessages")
+    messages = messages if isinstance(messages, list) else []
+    fh.write("=" * 80 + "\n")
+    fh.write(
+        f"[{character_id}] {label}  HTTP {status}  {elapsed_ms:.0f}ms  "
+        f"request_bytes={len(json.dumps(body))} "
+        f"response_bytes={len(raw_response or '')}\n"
+    )
+    fh.write("---- REQUEST query messages ----\n")
+    for item in messages:
+        if isinstance(item, dict):
+            fh.write(f"[{item.get('role', '?')}] {item.get('message', '')}\n")
+    fh.write("---- REQUEST full body (JSON) ----\n")
+    fh.write(json.dumps(body, ensure_ascii=False, indent=2) + "\n")
+    fh.write("---- RESPONSE raw body ----\n")
+    fh.write((raw_response or "") + "\n")
+    if payload is not None:
+        fh.write("---- RESPONSE parsed content ----\n")
+        for item in payload.get("messages") or []:
+            if isinstance(item, dict):
+                fh.write(str(item.get("content", "")) + "\n")
+    fh.write("\n")
+    fh.flush()
+
+
 def _get_profile(driver) -> dict[str, Any]:
     result = _authed_fetch(driver, PROFILE_URL)
     if result["status"] >= 400:
@@ -1422,6 +1463,7 @@ class GenerateAlphaError(RuntimeError):
 
     def __init__(self, status: int, body: str) -> None:
         self.status = status
+        self.body = body or ""
         super().__init__(
             f"generateAlpha failed: HTTP {status} response_bytes={len(body or '')}"
         )
@@ -1447,9 +1489,15 @@ def _post_generate_alpha(
 
 
 def _call_generate_alpha(
-    driver, body: dict[str, Any], chat_id: str | int
+    driver,
+    body: dict[str, Any],
+    chat_id: str | int,
+    *,
+    raw: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = _post_generate_alpha(driver, body, chat_id)
+    if raw is not None:  # capture the untouched HTTP result for --dump
+        raw.update(result)
     if result["status"] >= 400:
         raise GenerateAlphaError(int(result["status"]), result.get("body") or "")
     payload = _parse_generate_alpha_body(result.get("body") or "")
@@ -1832,6 +1880,8 @@ def _extract_character(
     mode: str = "proxy",
     jllm_passes: int = JLLM_LEAK_PASSES,
     meta: dict[str, Any] | None = None,
+    dump_path: str | None = None,
+    lore_parser: str = "blank",
 ) -> dict[str, Any]:
     """Rip one character's card + lorebook via direct ``/generateAlpha`` calls.
 
@@ -1848,6 +1898,14 @@ def _extract_character(
     """
     chat_id = ""
     base_messages: list[dict[str, Any]] = []
+    # --dump: append every raw request/response to a debug .txt (open in "a"
+    # so multi-target captures all land in one file).
+    dump_fh = open(dump_path, "a", encoding="utf-8") if dump_path else None
+    if dump_fh is not None:
+        _extract_log(
+            f"[{character_id}] dumping raw generateAlpha traffic to {dump_path}",
+            verbose=verbose,
+        )
     if pacer is None:
         pacer = _Pacer(floor=settle)
     generation_stats: dict[str, int | float] = {
@@ -1874,11 +1932,19 @@ def _extract_character(
             pacer.wait()  # adaptive: no-op on healthy runs, spaces calls after a 429
             generation_stats["attempts"] += 1
             started = time.monotonic()
+            raw: dict[str, Any] = {}
             try:
-                payload = _call_generate_alpha(driver, body, chat_id)
+                payload = _call_generate_alpha(
+                    driver, body, chat_id, **({"raw": raw} if dump_fh else {})
+                )
                 elapsed_ms = (time.monotonic() - started) * 1000
                 generation_stats["succeeded"] += 1
                 generation_stats["elapsedMs"] += elapsed_ms
+                if dump_fh is not None:
+                    _write_generate_dump(
+                        dump_fh, character_id, label, 200, elapsed_ms,
+                        body, raw.get("body", ""), payload,
+                    )
                 response_detail = (
                     f" response[{_generate_response_summary(payload)}]"
                     if verbose >= 3
@@ -1894,6 +1960,11 @@ def _extract_character(
             except GenerateAlphaError as exc:
                 elapsed_ms = (time.monotonic() - started) * 1000
                 generation_stats["elapsedMs"] += elapsed_ms
+                if dump_fh is not None:
+                    _write_generate_dump(
+                        dump_fh, character_id, label, exc.status, elapsed_ms,
+                        body, exc.body, None,
+                    )
                 _clog(
                     f"{label} generateAlpha {exc.status} ({elapsed_ms:.0f}ms)"
                     f"{request_detail}",
@@ -2179,7 +2250,7 @@ def _extract_character(
                     _clog(f"warning: pass {index + 1} failed, skipping: {exc}")
                     continue
                 full_payload = payload
-                separated_pass = separate(payload, card, public_contents)
+                separated_pass = separate(payload, card, public_contents, parser=lore_parser)
                 separations.append(separated_pass)
                 pass_entries = {
                     _norm(entry)
@@ -2204,7 +2275,7 @@ def _extract_character(
                 )
 
             if not separations:
-                separations.append(separate(probe_payload, card, public_contents))
+                separations.append(separate(probe_payload, card, public_contents, parser=lore_parser))
                 trigger_passes.append(
                     {
                         "index": 0,
@@ -2216,25 +2287,51 @@ def _extract_character(
                 )
 
             separated = merge_separated_results(separations)
+            json_entries = separated.get("jsonEntries") or []
 
-            # The broad passes recover text but cannot reveal which portion of a
-            # long message activated it.  Optionally replay narrow, one-candidate
-            # prompts and retain only candidates whose fresh response injects the
-            # corresponding recovered block.
-            probe_separated = separate(probe_payload, card, public_contents)
-            recovered_constants = {
-                _norm(entry)
-                for entry in probe_separated.get("entries") or []
-                if _norm(entry)
-            }
             recovered_triggers: dict[str, list[str]] = {}
-            searchable_entries = [
-                entry
-                for entry in separated["entries"]
-                if _norm(entry) not in recovered_constants
-            ]
             candidates: list[tuple[str, str]] = []
             trigger_search_probes = 0
+            if json_entries:
+                # The JSON echo carried each entry's real key[] and grouping, so
+                # read triggers directly. The 48-probe search and the probe-based
+                # constant guess are both meaningless here: the probe echo also
+                # contains the whole book, so everything would look "constant".
+                # An entry with no key[] is genuinely always-active.
+                recovered_triggers = {
+                    _norm(obj["content"]): list(dict.fromkeys(obj.get("key") or []))
+                    for obj in json_entries
+                    if _norm(obj.get("content") or "") and obj.get("key")
+                }
+                recovered_constants = {
+                    _norm(obj["content"])
+                    for obj in json_entries
+                    if _norm(obj.get("content") or "") and not obj.get("key")
+                }
+                searchable_entries = []
+                _clog(
+                    f"json parser: {len(json_entries)} entries with ground-truth "
+                    f"keys ({len(recovered_triggers)} triggered, "
+                    f"{len(recovered_constants)} constant); skipping trigger search"
+                )
+            else:
+                # The broad passes recover text but cannot reveal which portion of
+                # a long message activated it.  Optionally replay narrow, one-
+                # candidate prompts and retain only candidates whose fresh response
+                # injects the corresponding recovered block.
+                probe_separated = separate(
+                    probe_payload, card, public_contents, parser=lore_parser
+                )
+                recovered_constants = {
+                    _norm(entry)
+                    for entry in probe_separated.get("entries") or []
+                    if _norm(entry)
+                }
+                searchable_entries = [
+                    entry
+                    for entry in separated["entries"]
+                    if _norm(entry) not in recovered_constants
+                ]
             if find_triggers and searchable_entries:
                 candidates = build_trigger_search_messages(searchable_entries)[
                     :max_trigger_search_passes
@@ -2258,7 +2355,7 @@ def _extract_character(
                         continue
                     trigger_search_probes += 1
                     found = (
-                        separate(payload, card, public_contents).get("entries") or []
+                        separate(payload, card, public_contents, parser=lore_parser).get("entries") or []
                     )
                     matched_keys = _trigger_search_matches(
                         found, separated["entries"], recovered_constants
@@ -2375,6 +2472,8 @@ def _extract_character(
     finally:
         if chat_id and delete_chat_on_error:
             _delete_chat(driver, chat_id)
+        if dump_fh is not None:
+            dump_fh.close()
 
 
 @_task
@@ -2459,6 +2558,8 @@ def extract_task(driver, data):
             mode=mode,
             jllm_passes=jllm_passes,
             meta=meta,
+            dump_path=(str(data.get("dump_path")) if data.get("dump_path") else None),
+            lore_parser=str(data.get("lore_parser") or "blank"),
         )
     finally:
         if persona_id:

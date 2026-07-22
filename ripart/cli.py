@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -590,6 +591,22 @@ def lorebook(lorebook_id: str, limit: int, headed: bool) -> None:
     is_flag=True,
     help="Blindly capture and merge every public character attached to the reference.",
 )
+@click.option(
+    "--dump",
+    "dump",
+    is_flag=True,
+    help="With --capture: append every raw generateAlpha request/response/HTTP "
+    "status to a temp .txt file (for improving parsing/retrieval).",
+)
+@click.option(
+    "--parser",
+    "lore_parser",
+    type=click.Choice(["blank", "json"]),
+    default="blank",
+    show_default=True,
+    help="With --capture: lorebook separator. 'blank' splits the echo on blank "
+    "lines; 'json' parses the echoed world-info array (clean entries + real keys).",
+)
 @verbose_option
 @headed_option
 def benchmark_lorebook(
@@ -600,6 +617,8 @@ def benchmark_lorebook(
     output: Path | None,
     capture: bool,
     all_attached: bool,
+    dump: bool,
+    lore_parser: str,
     verbose: int,
     headed: bool,
 ) -> None:
@@ -611,9 +630,19 @@ def benchmark_lorebook(
     """
     capture_result: dict | None = None
     capture_results: list[dict] = []
+    dump_path: str | None = None
+    if dump and not capture:
+        raise click.UsageError("--dump requires --capture")
     if capture:
         if reconstructed_id:
             raise click.UsageError("--reconstructed cannot be used with --capture")
+        if dump:
+            fd, dump_path = tempfile.mkstemp(
+                prefix=f"ripart-dump-{safe_name(character_id, 'character')}-",
+                suffix=".txt",
+            )
+            os.close(fd)
+            _field("dump", dump_path)
         capture_targets = [character_id]
         indexed_reference: dict | None = None
         if all_attached:
@@ -643,6 +672,8 @@ def benchmark_lorebook(
             # separation and trigger-generation inputs.
             "blind_lorebook_benchmark_id": reference_id or "",
             "jllm_leak": False,
+            "dump_path": dump_path,
+            "lore_parser": lore_parser,
         }
         for target in capture_targets:
             capture_results.append(
@@ -790,6 +821,8 @@ def benchmark_lorebook(
         elif input_changes.get("reconstructedChanged") is True:
             _field("reconstruction input", "changed from baseline")
     _path("report", report_path)
+    if dump_path:
+        _path("dump", Path(dump_path))
 
     weakest = sorted(report["matches"], key=lambda item: item["score"])[:5]
     if weakest:

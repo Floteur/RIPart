@@ -353,7 +353,14 @@ def _split_entries(text: str) -> list[str]:
 def merge_separated_results(separations: list[dict[str, Any]]) -> dict[str, Any]:
     blocks: list[str] = []
     seen: set[str] = set()
+    json_entries: list[dict[str, Any]] = []
+    json_seen: set[str] = set()
     for separated in separations:
+        for obj in separated.get("jsonEntries") or []:
+            key = _norm(obj.get("content") or "")
+            if key and key not in json_seen:
+                json_seen.add(key)
+                json_entries.append(obj)
         for block in separated.get("entries") or []:
             text = str(block or "").strip()
             if len(text) < 8:
@@ -375,9 +382,106 @@ def merge_separated_results(separations: list[dict[str, Any]]) -> dict[str, Any]
                 seen.add(key)
                 blocks.append(normalize_user_placeholder(text))
     lorebook_text = re.sub(r"\n{3,}", "\n\n", "\n\n".join(blocks)).strip()
-    return {
+    result = {
         "lorebookText": lorebook_text,
         "entries": blocks,
+    }
+    if json_entries:
+        result["jsonEntries"] = json_entries
+    return result
+
+
+_JSON_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "/": "/"}
+_WI_FIELD = re.compile(
+    r'\n\s*"(content|key|keysecondary|inclusionGroup|comment|order|'
+    r'constant|selective|disable)"\s*:'
+)
+
+
+def _json_unescape(value: str) -> str:
+    return re.sub(r"\\(.)", lambda m: _JSON_ESCAPES.get(m.group(1), m.group(1)), value)
+
+
+def parse_world_info_json(system_content: str) -> list[dict[str, Any]]:
+    """Recover the closed lorebook from an echoed world-info JSON array.
+
+    In proxy-extraction mode ``/generateAlpha`` often echoes the whole book as
+    ``[{"content": "...", "key": [...], "inclusionGroup": [...]}, ...]`` - the
+    real per-entry boundaries AND trigger keys, in one call. Returns one dict per
+    entry, or ``[]`` when that shape is absent (caller falls back to blank-line
+    splitting).
+
+    ponytail: field-anchored, not ``json.loads`` - the model emits unescaped
+    quotes inside content (e.g. ``6'5"``), so strict JSON parsing dies. The field
+    names (``"content":``, ``"key":`` ...) are structural and never appear inside
+    a content value, so we slice on them and only need to unescape the values.
+    """
+    i, j = system_content.find("["), system_content.rfind("]")
+    if i < 0 or j <= i:
+        return []
+    body = system_content[i + 1 : j]
+    marks = [(m.start() - 1, m.group(1)) for m in _WI_FIELD.finditer("\n" + body)]
+    starts = [k for k, (_, name) in enumerate(marks) if name == "content"]
+    if not starts:
+        return []
+
+    def _array(window: str, field: str) -> list[str]:
+        m = re.search(rf'"{field}"\s*:\s*\[(.*?)\]', window, re.S)
+        if not m:
+            return []
+        return [
+            _json_unescape(x)
+            for x in re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+        ]
+
+    entries: list[dict[str, Any]] = []
+    for si, mk in enumerate(starts):
+        w0 = marks[mk][0]
+        w1 = marks[starts[si + 1]][0] if si + 1 < len(starts) else len(body)
+        window = body[w0:w1]
+        cm = re.search(r'"content"\s*:\s*"', window)
+        if not cm:
+            continue
+        nxt = _WI_FIELD.search("\n" + window, cm.end() + 1)
+        cval = window[cm.end() : (nxt.start() - 1) if nxt else len(window)]
+        content = _json_unescape(re.sub(r'",?\s*$', "", cval.rstrip())).strip()
+        if content:
+            entries.append(
+                {
+                    "content": content,
+                    "key": _array(window, "key"),
+                    "inclusionGroup": _array(window, "inclusionGroup"),
+                }
+            )
+    return entries
+
+
+def _separate_json(
+    payload: dict[str, Any],
+    known_card: str,
+    public_contents: list[str] | None,
+) -> dict[str, Any] | None:
+    """JSON-aware separator. ``None`` when the echo has no world-info array."""
+    system_content = get_system_content(payload)
+    parsed = parse_world_info_json(system_content)
+    if not parsed:
+        return None
+    known = {_norm(known_card)} if known_card else set()
+    public = {_norm(c) for c in (public_contents or []) if len(_norm(c)) >= 12}
+    entries: list[str] = []
+    kept: list[dict[str, Any]] = []
+    for obj in parsed:
+        text = normalize_user_placeholder(obj["content"]).strip()
+        key = _norm(text)
+        if len(text) < 8 or key in public or key in known:
+            continue
+        entries.append(text)
+        kept.append({**obj, "content": text})
+    return {
+        "systemContent": system_content,
+        "lorebookText": re.sub(r"\n{3,}", "\n\n", "\n\n".join(entries)).strip(),
+        "entries": entries,
+        "jsonEntries": kept,  # content + real key[] + inclusionGroup, for triggers
     }
 
 
@@ -385,7 +489,13 @@ def separate(
     payload: dict[str, Any],
     known_card: str = "",
     public_contents: list[str] | None = None,
+    parser: str = "blank",
 ) -> dict[str, Any]:
+    if parser == "json":
+        result = _separate_json(payload, known_card, public_contents)
+        if result is not None:
+            return result
+        # no JSON array in this echo - fall through to blank-line splitting
     system_content = get_system_content(payload)
     text = strip_wrappers(system_content)
     if known_card:

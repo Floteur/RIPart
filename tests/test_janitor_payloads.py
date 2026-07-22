@@ -12,7 +12,53 @@ from ripart.providers.janitor.payloads import (
     build_trigger_search_messages,
     separate,
 )
-from ripart.providers.janitor.payloads import _split_entries
+from ripart.providers.janitor.payloads import _split_entries, parse_world_info_json
+
+
+def test_parse_world_info_json_splits_entries_and_keeps_keys():
+    # Echo shape from proxy mode: a JSON array of world-info objects, whose
+    # content values carry unescaped quotes (6'5") that break strict json.loads.
+    system = (
+        "<X's Persona>[\n"
+        '  {\n "content": "<Name> \\"Arkha\\" </name>\\n\\n'
+        '<Appearance> \\"Tall, 195cm (6\'5"), dark skin.\\" </appearance>",\n'
+        '   "inclusionGroup": ["Cleaner"],\n'
+        '   "key": ["Arkha", "Corvus", "boss of the Cleaners"]\n  },\n'
+        '  {\n "content": "<Name> \\"Enjin\\" </name>",\n'
+        '   "key": ["Enjin"]\n  }\n]</Persona>'
+    )
+    entries = parse_world_info_json(system)
+
+    assert len(entries) == 2  # two objects, not shattered on the blank line
+    assert entries[0]["key"] == ["Arkha", "Corvus", "boss of the Cleaners"]
+    assert entries[0]["inclusionGroup"] == ["Cleaner"]
+    # unescaped quote inside content is preserved, escapes decoded
+    assert '6\'5")' in entries[0]["content"]
+    assert "\\n" not in entries[0]["content"]
+    assert entries[1]["content"] == '<Name> "Enjin" </name>'
+    # absent shape -> empty, so the caller falls back to blank-line splitting
+    assert parse_world_info_json("no array here") == []
+
+
+def test_merge_preserves_and_dedupes_json_entries():
+    from ripart.providers.janitor.payloads import merge_separated_results
+
+    a = {
+        "entries": ["<Name> \"Arkha\" </name>"],
+        "lorebookText": "",
+        "jsonEntries": [{"content": '<Name> "Arkha" </name>', "key": ["Arkha"]}],
+    }
+    b = {  # same entry (dupe) + a new one, across a second pass
+        "entries": ['<Name> "Arkha" </name>', '<Name> "Enjin" </name>'],
+        "lorebookText": "",
+        "jsonEntries": [
+            {"content": '<Name> "Arkha" </name>', "key": ["Arkha"]},
+            {"content": '<Name> "Enjin" </name>', "key": ["Enjin"]},
+        ],
+    }
+    merged = merge_separated_results([a, b])
+    keys = [k for e in merged["jsonEntries"] for k in e["key"]]
+    assert keys == ["Arkha", "Enjin"]  # deduped by content, keys survive the merge
 
 
 def test_split_entries_keeps_headings_with_their_block():
