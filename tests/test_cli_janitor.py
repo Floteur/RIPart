@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from click.testing import CliRunner
 
 import ripart.cli as cli
@@ -100,6 +102,136 @@ def test_janitor_lorebook_indexes_all_provider_linked_characters(monkeypatch, tm
     assert index.exists()
     record = tmp_path / "library" / "lorebooks" / "janitor" / "book-42.json"
     assert record.exists()
+
+
+def test_janitor_lorebook_benchmark_writes_offline_report(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "OUT", tmp_path)
+    lorebook_dir = tmp_path / "library" / "lorebooks" / "janitor"
+    lorebook_dir.mkdir(parents=True)
+    public = {
+        "sourceLorebookId": "public",
+        "title": "Public",
+        "characterIds": ["char-a"],
+        "worldInfo": {
+            "entries": {"0": {"content": "Maisie lives in Minneapolis."}}
+        },
+    }
+    closed = {
+        "sourceLorebookId": "closed",
+        "title": "Closed",
+        "characterIds": ["char-a"],
+        "recoveredWorldInfo": {
+            "entries": {"0": {"content": "Maisie lives in Minneapolis."}}
+        },
+    }
+    (lorebook_dir / "public.json").write_text(json.dumps(public))
+    (lorebook_dir / "closed.json").write_text(json.dumps(closed))
+
+    result = CliRunner().invoke(
+        cli.main, ["janitor", "benchmark-lorebook", "char-a"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "semantic token recall: 100.0%" in result.output
+    report = tmp_path / "benchmarks" / "lorebooks" / "char-a.json"
+    assert report.exists()
+
+
+def test_janitor_lorebook_benchmark_merges_all_attached_blind_captures(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(cli, "OUT", tmp_path)
+    reference = {
+        "id": "shared-book",
+        "title": "Shared",
+        "worldInfo": {
+            "entries": {
+                "0": {"content": "True constant", "constant": True},
+                "1": {"content": "Alpha lore", "key": ["Alpha"]},
+                "2": {"content": "Beta lore", "key": ["Beta"]},
+            }
+        },
+    }
+
+    def fake_lorebook_task(data, **_browser_options):
+        assert data == {"lorebook_id": "shared-book"}
+        return {
+            "lorebook": reference,
+            "characters": [{"id": "char-a"}, {"id": "char-b"}],
+        }
+
+    def fake_extract_task(data, **_browser_options):
+        character = data["url"]
+        suffix = "Alpha" if character == "char-a" else "Beta"
+        return {
+            "characterId": character,
+            "entries": ["True constant", f"{suffix} lore"],
+            "recoveredConstants": ["True constant", f"{suffix} lore"],
+            "recoveredTriggers": {f"{suffix.lower()} lore": [suffix]},
+            "benchmarkReferenceLorebook": reference,
+        }
+
+    monkeypatch.setattr(cli, "lorebook_task", fake_lorebook_task)
+    monkeypatch.setattr(cli, "extract_task", fake_extract_task)
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "janitor",
+            "benchmark-lorebook",
+            "https://janitorai.com/scripts/shared-book",
+            "--capture",
+            "--all-attached",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report_path = tmp_path / "benchmarks" / "lorebooks" / "shared-book-blind.json"
+    report = json.loads(report_path.read_text())
+    assert report["benchmarkType"] == "lorebook-blind-ground-truth"
+    assert report["captureCharacterIds"] == ["char-a", "char-b"]
+    assert len(report["capturedWorldInfo"]["entries"]) == 3
+    assert report["metrics"]["constantPrecision"] == 1.0
+
+
+def test_janitor_lorebook_benchmark_warns_when_baseline_input_is_unchanged(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(cli, "OUT", tmp_path)
+    lorebook_dir = tmp_path / "library" / "lorebooks" / "janitor"
+    lorebook_dir.mkdir(parents=True)
+    public = {
+        "sourceLorebookId": "public",
+        "title": "Public",
+        "characterIds": ["char-a"],
+        "worldInfo": {"entries": {"0": {"content": "Public known fact."}}},
+    }
+    closed = {
+        "sourceLorebookId": "closed",
+        "title": "Closed",
+        "characterIds": ["char-a"],
+        "recoveredWorldInfo": {
+            "entries": {"0": {"content": "Public known fact."}}
+        },
+    }
+    (lorebook_dir / "public.json").write_text(json.dumps(public))
+    (lorebook_dir / "closed.json").write_text(json.dumps(closed))
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text(json.dumps(cli.benchmark_lorebooks(public, closed)))
+
+    result = CliRunner().invoke(
+        cli.main,
+        [
+            "janitor",
+            "benchmark-lorebook",
+            "char-a",
+            "--baseline",
+            str(baseline),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "reconstructed content fingerprint is identical" in result.output
 
 
 def test_provider_extract_adapter_binds_current_cli_output_directory(

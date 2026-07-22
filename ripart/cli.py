@@ -23,6 +23,15 @@ from . import cli_extractors
 from .common.cards import save_to_library
 from .common.discord_forum import publish_saved_card
 from .common.lorebooks import update_lorebook_library
+from .common.lorebook_benchmark import (
+    benchmark_input_changes,
+    benchmark_lorebooks,
+    load_benchmark_pair,
+    metric_deltas,
+    merge_blind_captures,
+    reconstructed_record_from_capture,
+    injectable_reference_record,
+)
 from .common.storage import state_path
 from .common.text import safe_name, write_json
 from .providers import chub as cb
@@ -546,6 +555,274 @@ def lorebook(lorebook_id: str, limit: int, headed: bool) -> None:
 # --------------------------------------------------------------------------- #
 
 
+@main.command("benchmark-lorebook")
+@click.argument("character_id", metavar="CHARACTER_OR_LOREBOOK")
+@click.option(
+    "--reference",
+    "reference_id",
+    metavar="LOREBOOK_ID",
+    help="Readable lorebook to use as the silver-standard reference.",
+)
+@click.option(
+    "--reconstructed",
+    "reconstructed_id",
+    metavar="LOREBOOK_ID",
+    help="Closed lorebook containing recoveredWorldInfo.",
+)
+@click.option(
+    "--baseline",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Previous benchmark JSON; print and save current-minus-baseline deltas.",
+)
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Report path (default: output/cli/benchmarks/lorebooks/<character>.json).",
+)
+@click.option(
+    "--capture",
+    is_flag=True,
+    help="Blindly capture closed lore, then compare against every open book "
+    "attached to the character (or one, with --reference).",
+)
+@click.option(
+    "--all-attached",
+    is_flag=True,
+    help="Blindly capture and merge every public character attached to the reference.",
+)
+@verbose_option
+@headed_option
+def benchmark_lorebook(
+    character_id: str,
+    reference_id: str | None,
+    reconstructed_id: str | None,
+    baseline: Path | None,
+    output: Path | None,
+    capture: bool,
+    all_attached: bool,
+    verbose: int,
+    headed: bool,
+) -> None:
+    """Compare a reconstructed closed lorebook with a readable public one.
+
+    This is an offline silver-standard benchmark over saved library JSON. The
+    two books may be different editions, so scores measure semantic coverage
+    and structural fidelity rather than exact hidden-source correctness.
+    """
+    capture_result: dict | None = None
+    capture_results: list[dict] = []
+    if capture:
+        if reconstructed_id:
+            raise click.UsageError("--reconstructed cannot be used with --capture")
+        capture_targets = [character_id]
+        indexed_reference: dict | None = None
+        if all_attached:
+            reference_id = str(reference_id or character_id).rstrip("/").rsplit("/", 1)[-1]
+            indexed = lorebook_task(
+                {"lorebook_id": reference_id}, **browser_kwargs(headed)
+            )
+            indexed_reference = indexed.get("lorebook")
+            capture_targets = [
+                str(item.get("id") or "")
+                for item in indexed.get("characters") or []
+                if isinstance(item, dict) and item.get("id")
+            ]
+            if not capture_targets:
+                raise RuntimeError("reference lorebook has no attached public characters")
+        capture_options = {
+            "delete_chat_on_error": False,
+            "verbose": verbose,
+            "max_trigger_passes": 8,
+            "trigger_chunk_size": 2500,
+            "trigger_settle_ms": 0,
+            "find_triggers": True,
+            "max_trigger_search_passes": 48,
+            "trigger_search_miss_limit": 8,
+            # Empty means auto-select every public injectable book. The browser
+            # task fetches them for scoring but withholds them from all
+            # separation and trigger-generation inputs.
+            "blind_lorebook_benchmark_id": reference_id or "",
+            "jllm_leak": False,
+        }
+        for target in capture_targets:
+            capture_results.append(
+                extract_task(
+                    {"url": target, **capture_options},
+                    **browser_kwargs(headed),
+                )
+            )
+        capture_result = (
+            merge_blind_captures(capture_results)
+            if len(capture_results) > 1
+            else capture_results[0]
+        )
+        reference = indexed_reference or capture_result.get("benchmarkReferenceLorebook")
+        if not isinstance(reference, dict):
+            raise RuntimeError("blind capture returned no benchmark reference")
+        reference, excluded_disabled = injectable_reference_record(reference)
+        reconstructed = reconstructed_record_from_capture(capture_result)
+    else:
+        reference, reconstructed = load_benchmark_pair(
+            OUT / "library" / "lorebooks" / "janitor",
+            character_id,
+            reference_id=reference_id,
+            reconstructed_id=reconstructed_id,
+        )
+    report = benchmark_lorebooks(reference, reconstructed)
+    report["characterId"] = character_id
+    if capture and all_attached:
+        report["lorebookId"] = reference_id
+    if capture:
+        report["benchmarkType"] = "lorebook-blind-ground-truth"
+        report["caveat"] = (
+            "The public reference contents and keys were withheld from capture; "
+            "they were loaded only for this post-capture comparison."
+        )
+        report["captureMode"] = "blind-generateAlpha"
+        report["referenceDisabledEntriesExcluded"] = excluded_disabled
+        report["captureDiagnostics"] = (capture_result or {}).get("diagnostics")
+        report["captureCharacterIds"] = [
+            str(item.get("characterId") or "") for item in capture_results
+        ]
+        report["captureRuns"] = (capture_result or {}).get("captureRuns") or [
+            {
+                "characterId": item.get("characterId"),
+                "characterName": item.get("characterName"),
+                "entries": len(item.get("entries") or []),
+                "baselineActiveEntries": len(item.get("recoveredConstants") or []),
+                "diagnostics": item.get("diagnostics"),
+            }
+            for item in capture_results
+        ]
+        # Keep the full artifacts: this report is meant to diagnose dumping,
+        # not merely display an aggregate score.
+        report["referenceWorldInfo"] = reference.get("worldInfo")
+        report["capturedWorldInfo"] = reconstructed.get("recoveredWorldInfo")
+    deltas: dict[str, float] = {}
+    input_changes: dict[str, bool | None] = {}
+    if baseline:
+        previous = json.loads(baseline.read_text(encoding="utf-8"))
+        deltas = metric_deltas(report, previous)
+        input_changes = benchmark_input_changes(report, previous)
+        report["baseline"] = {
+            "path": str(baseline),
+            "metricDeltas": deltas,
+            **input_changes,
+        }
+    default_suffix = "-blind" if capture else ""
+    report_identity = reference_id if capture and all_attached else character_id
+    report_path = output or (
+        OUT
+        / "benchmarks"
+        / "lorebooks"
+        / f"{safe_name(report_identity, 'character')}{default_suffix}.json"
+    )
+    write_json(report_path, report)
+
+    metrics = report["metrics"]
+    _ok("benchmarked reconstructed lorebook against public silver standard")
+    _field(
+        "reference",
+        f"{report['reference'].get('title')} ({report['reference'].get('sourceLorebookId')})",
+    )
+    _field(
+        "reconstructed",
+        f"{report['reconstructed'].get('title')} "
+        f"({report['reconstructed'].get('sourceLorebookId')})",
+    )
+    _field(
+        "entries",
+        f"{metrics['recoveredEntries']} recovered / {metrics['referenceEntries']} reference",
+    )
+    _field("semantic token recall", f"{metrics['tokenRecall']:.1%}")
+    _field("semantic token F1", f"{metrics['tokenF1']:.1%}")
+    _field("exact 8-gram recall", f"{metrics['char8Recall']:.1%}")
+    _field("mean reference coverage", f"{metrics['meanBestReferenceScore']:.1%}")
+    _field("reference coverage ≥50%", f"{metrics['referenceCoverageAt50']:.1%}")
+    if capture:
+        _field(
+            "split-aware exact coverage",
+            f"{metrics['meanSplitAwareChar8Coverage']:.1%}",
+        )
+        _field(
+            "reference-attributed fragments",
+            f"{metrics['referenceAttributedRecoveredEntries']}/"
+            f"{metrics['recoveredEntries']}",
+        )
+        _field(
+            "disabled reference entries excluded",
+            report.get("referenceDisabledEntriesExcluded", 0),
+        )
+        _field("trigger recall", f"{metrics['triggerRecall']:.1%}")
+        _field("trigger precision", f"{metrics['triggerPrecision']:.1%}")
+        _field("constant accuracy", f"{metrics['constantAccuracy']:.1%}")
+        _field("constant recall", f"{metrics['constantRecall']:.1%}")
+        _field("constant precision", f"{metrics['constantPrecision']:.1%}")
+    _field(
+        "aligned entries",
+        f"{metrics['alignedEntries']} ({metrics['unmatchedReferenceEntries']} "
+        "reference sections unmatched)",
+    )
+    recovery_run = report.get("latestRecoveryRun")
+    if isinstance(recovery_run, dict):
+        _field(
+            "latest extractor run",
+            f"{recovery_run.get('recoveredEntries', 0)} entries, "
+            f"{recovery_run.get('triggerSearchProbes', 0)} search probes, "
+            f"{recovery_run.get('generateAttempts', 0)} generations, "
+            f"{recovery_run.get('rateLimits', 0)} rate limits",
+        )
+    if deltas:
+        _field(
+            "token recall delta",
+            f"{deltas.get('tokenRecall', 0):+.1%}",
+        )
+        _field(
+            "mean coverage delta",
+            f"{deltas.get('meanBestReferenceScore', 0):+.1%}",
+        )
+        if input_changes.get("reconstructedChanged") is False:
+            console.print(
+                "  [bold yellow]unchanged:[/] reconstructed content fingerprint "
+                "is identical to the baseline; run a fresh extraction before "
+                "evaluating extractor changes"
+            )
+        elif input_changes.get("reconstructedChanged") is True:
+            _field("reconstruction input", "changed from baseline")
+    _path("report", report_path)
+
+    weakest = sorted(report["matches"], key=lambda item: item["score"])[:5]
+    if weakest:
+        table = Table(title="Weakest aligned entries", show_header=True)
+        table.add_column("reference")
+        table.add_column("recovered")
+        table.add_column("score", justify="right")
+        table.add_column("reference preview")
+        for match in weakest:
+            table.add_row(
+                str(match["referenceUid"]),
+                str(match["recoveredUid"]),
+                f"{match['score']:.1%}",
+                str(match["referencePreview"])[:72],
+            )
+        console.print(table)
+    unmatched = sorted(
+        report["unmatchedReference"], key=lambda item: item["bestScore"]
+    )[:5]
+    if unmatched:
+        table = Table(title="Unmatched public-reference sections", show_header=True)
+        table.add_column("reference")
+        table.add_column("best score", justify="right")
+        table.add_column("preview")
+        for item in unmatched:
+            table.add_row(
+                str(item["uid"]),
+                f"{item['bestScore']:.1%}",
+                str(item["preview"])[:88],
+            )
+        console.print(table)
+
+
 @main.command()
 @click.argument("url", metavar="URL_OR_UUID")
 @headed_option
@@ -1042,6 +1319,7 @@ for _janitor_command in (
     login,
     import_session,
     lorebook,
+    benchmark_lorebook,
     inspect,
     extract,
     recent,
@@ -1056,6 +1334,7 @@ for _janitor_root_command in (
     "login",
     "import-session",
     "lorebook",
+    "benchmark-lorebook",
     "inspect",
     "recent",
 ):

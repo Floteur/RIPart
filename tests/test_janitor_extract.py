@@ -113,6 +113,66 @@ def test_trigger_search_plateau_requires_full_coverage_and_positive_limit():
     )
 
 
+def test_blind_benchmark_rejects_public_books_whose_entries_are_disabled():
+    book = {
+        "id": "disabled-book",
+        "isCodePublic": True,
+        "worldInfo": {
+            "entries": {
+                "0": {"content": "Known lore", "enabled": False, "disable": True}
+            }
+        },
+    }
+
+    try:
+        browser_tasks._select_blind_benchmark_lorebooks([book], "disabled-book")
+    except RuntimeError as exc:
+        assert "all 1 public entries are disabled" in str(exc)
+    else:
+        raise AssertionError("disabled public book should be ineligible")
+
+
+def test_blind_benchmark_selects_one_enabled_public_book():
+    book = {
+        "id": "enabled-book",
+        "isCodePublic": True,
+        "worldInfo": {
+            "entries": {
+                "0": {"content": "Known lore", "enabled": True, "disable": False}
+            }
+        },
+    }
+
+    assert browser_tasks._select_blind_benchmark_lorebooks([book], "enabled-book") == [
+        book
+    ]
+
+
+def test_blind_benchmark_auto_selects_all_public_books():
+    books = [
+        {
+            "id": "book-a",
+            "isCodePublic": True,
+            "title": "A",
+            "worldInfo": {"entries": {"0": {"content": "Alpha lore", "enabled": True}}},
+        },
+        {
+            "id": "book-b",
+            "isCodePublic": True,
+            "title": "B",
+            "worldInfo": {"entries": {"0": {"content": "Beta lore", "enabled": True}}},
+        },
+        {"id": "closed", "isCodePublic": False, "worldInfo": {"entries": {}}},
+    ]
+
+    selected = browser_tasks._select_blind_benchmark_lorebooks(books, "")
+    assert [book["id"] for book in selected] == ["book-a", "book-b"]
+
+    merged = browser_tasks._merge_reference_books(selected)
+    assert merged["id"] == "book-a+book-b"
+    assert len(merged["worldInfo"]["entries"]) == 2
+
+
 def test_extract_does_not_turn_a_prompt_residue_into_lore_without_a_script(
     monkeypatch, capsys
 ):
@@ -153,6 +213,7 @@ def test_extract_does_not_turn_a_prompt_residue_into_lore_without_a_script(
         find_triggers=True,
         max_trigger_search_passes=48,
         trigger_search_miss_limit=8,
+        blind_lorebook_benchmark_id=None,
         settle=0,
         delete_chat_on_error=False,
         verbose=3,
@@ -174,3 +235,93 @@ def test_extract_does_not_turn_a_prompt_residue_into_lore_without_a_script(
     assert "response[messages=1 content_chars=" in log
     assert "Character definition." not in log
     assert "Prompt text outside the card wrappers." not in log
+
+
+def test_extract_skips_leak_when_attached_lorebook_is_fully_public(
+    monkeypatch, capsys
+):
+    """Code-public books arrive whole from /script - never re-leak them.
+
+    Definition is absent from meta (so the probe still runs for the card), but
+    every attached book is code-public, so no trigger passes or trigger-search
+    generateAlpha calls should fire and no lore should be "recovered".
+    """
+    payload = {
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "<Example Persona>Character definition.</Example Persona>\n\n"
+                    "# LOW TIDE\n\nLow Tide is a five-piece alternative rock band."
+                ),
+            }
+        ]
+    }
+    book = {
+        "id": "book1",
+        "title": "Low Tide",
+        "accessible": True,
+        "isPublic": True,
+        "isCodePublic": True,
+        "entryCount": 1,
+        "worldInfo": {
+            "entries": {
+                "0": {
+                    "uid": 0,
+                    "content": "# LOW TIDE\n\nLow Tide is a five-piece alternative rock band.",
+                    "key": ["Low Tide", "band"],
+                    "comment": "Low Tide",
+                }
+            }
+        },
+    }
+    meta = {
+        "id": "49b7e07d-7898-4715-bbbe-13d736dd89a3",
+        "name": "Abby",
+        "allow_proxy": True,
+        "scripts": [{"id": "book1", "type": "lorebook", "title": "Low Tide"}],
+    }
+
+    calls = {"n": 0}
+
+    def _one_generate(*_):
+        calls["n"] += 1
+        return payload
+
+    monkeypatch.setattr(browser_tasks, "_fetch_public_lorebooks", lambda *_: [book])
+    monkeypatch.setattr(browser_tasks, "_start_avatar_download", lambda *_: False)
+    monkeypatch.setattr(browser_tasks, "_await_avatar_download", lambda *_: "")
+    monkeypatch.setattr(browser_tasks, "_create_chat", lambda *_: "1")
+    monkeypatch.setattr(browser_tasks, "_recover_chat_greetings", lambda *_: None)
+    monkeypatch.setattr(browser_tasks, "_delete_chat", lambda *_: True)
+    monkeypatch.setattr(browser_tasks, "_call_generate_alpha", _one_generate)
+
+    result = browser_tasks._extract_character(
+        object(),
+        meta["id"],
+        f"https://janitorai.com/characters/{meta['id']}",
+        profile={},
+        persona=None,
+        chunk_size=2500,
+        max_trigger_passes=8,
+        find_triggers=True,
+        max_trigger_search_passes=48,
+        trigger_search_miss_limit=8,
+        blind_lorebook_benchmark_id=None,
+        settle=0,
+        delete_chat_on_error=False,
+        verbose=3,
+        meta=meta,
+    )
+
+    # Only the card probe fired - no trigger passes, no trigger-search probes.
+    assert calls["n"] == 1
+    assert result["entries"] == []
+    assert result["lorebookText"] == ""
+    assert result["publicLorebooks"] == [book]
+    assert result["diagnostics"]["triggerPasses"] == []
+    assert result["diagnostics"]["triggerSearchPasses"] == 0
+    log = capsys.readouterr().out
+    assert "lorebook fully public" in log
+    assert "lorebook trigger pass" not in log
+    assert "trigger research" not in log

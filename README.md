@@ -353,15 +353,45 @@ rip extract <url> --no-multi-trigger -v
 # Spend extra generations testing likely keys for recovered private lore
 rip janitor extract <url> --find-triggers --max-trigger-search-passes 48
 
+# Compare a saved reconstructed book with the character's readable public book
+rip janitor benchmark-lorebook <character-uuid>
+
+# Compare a new report with a preserved prior baseline
+rip janitor benchmark-lorebook <character-uuid> --baseline baseline.json
+
+# Blindly dump a character's closed lore, then compare against every open book it has
+rip janitor benchmark-lorebook <character-uuid> --capture -vvvv
+
+# Pin the comparison to one book when the character has several open ones
+rip janitor benchmark-lorebook <character-uuid> --capture --reference <lorebook-id> -vvvv
+
+# Merge blind dumps from every character publicly attached to a shared book
+rip janitor benchmark-lorebook <lorebook-url-or-id> --capture --all-attached -vvvv
+
 # Import a session dump on a headless box, retrying past Cloudflare
 rip janitor import-session ./session.json --bypass-cloudflare -v
 ```
 
-`-v`/`--verbose` is repeatable and stacks: `-v` prints progress diagnostics
-(chat/persona/trigger-pass narration), `-vv` adds one line per HTTP/generateAlpha
-call (status + timing), and `-vvv` adds a truncated preview of each raw
-request/response payload — for tracing a bug all the way down to the wire
-(`rip extract <url> -vvv`, `rip saucepan extract <url> --leak -vvv`).
+`-v`/`--verbose` is repeatable and stacks for Janitor extraction: `-v` prints
+progress diagnostics, `-vv` adds one line per generateAlpha call, `-vvv` adds
+content-free request/response shape metadata, and `-vvvv` adds bounded semantic
+trigger-research traces. Trigger search stops after every searchable entry has
+matched followed by eight misses; pass `--trigger-search-miss-limit 0` for an
+exhaustive run.
+
+Without `--capture`, `benchmark-lorebook` is an offline **silver-standard** comparison. It
+auto-selects the saved readable and reconstructed books attached to the
+character, aligns their entries, and reports semantic token coverage, exact
+8-gram fidelity, structural ratios, weak matches, and unmatched public
+sections. The books can be different author-maintained editions, so the score
+is a regression signal rather than proof of the hidden book's exact contents.
+With `--capture`, RIPart withholds the selected public book's entry bodies and
+keys from the extractor, performs the normal generateAlpha reconstruction, and
+only then compares it with the API copy. The report retains both complete World
+Info objects, content/key/constant metrics, and per-character capture diagnostics.
+`--all-attached` unions entry bodies and keys across every character listed by
+the lorebook API; only baseline-active entries shared by every capture are
+classified as constants.
 
 ## Clank (clank.world)
 

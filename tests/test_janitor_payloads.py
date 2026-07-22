@@ -8,6 +8,7 @@ from ripart.common.text import (
 )
 from ripart.providers.janitor.payloads import (
     build_character,
+    build_lorebook_trigger_messages,
     build_trigger_search_messages,
     separate,
 )
@@ -105,6 +106,17 @@ def test_trigger_search_messages_prioritize_headings_and_distinctive_words():
     assert candidates[0] == "NEIGHBORHOOD CORE RULES"
     assert "NEIGHBORHOOD" in candidates
     assert all(candidate == message for candidate, message in probes)
+
+
+def test_broad_trigger_messages_never_emit_an_oversized_primary():
+    messages = build_lorebook_trigger_messages(
+        {"first_message": "greeting " * 50},
+        "card " * 100,
+        chunk_size=120,
+    )
+
+    assert messages
+    assert max(map(len, messages)) <= 120
 
 
 def test_trigger_search_messages_are_distributed_across_entries():

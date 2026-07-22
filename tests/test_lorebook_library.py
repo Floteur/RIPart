@@ -176,6 +176,27 @@ def test_recovered_entries_are_attributed_only_to_closed_attachment(tmp_path):
         "recoveredTriggers": {
             "triggered private.": ["secret", "private fact"]
         },
+        "diagnostics": {
+            "triggerPasses": [
+                {
+                    "index": 1,
+                    "chars": 100,
+                    "entriesFound": 3,
+                    "newEntries": 3,
+                    "loreChars": 50,
+                }
+            ],
+            "triggerSearchPasses": 7,
+            "triggerSearchCandidates": 12,
+            "triggerSearchMissLimit": 8,
+            "triggerActivationGroups": 1,
+            "generation": {
+                "attempts": 10,
+                "succeeded": 9,
+                "rateLimits": 1,
+                "elapsedMs": 321.5,
+            },
+        },
     }
 
     update_lorebook_library(tmp_path, "char-a", result)
@@ -202,6 +223,15 @@ def test_recovered_entries_are_attributed_only_to_closed_attachment(tmp_path):
         (tmp_path / "lorebooks" / "janitor" / "public-book.json").read_text()
     )
     assert public["recoveredObservations"] == []
+    run = closed["recoveryRuns"][-1]
+    assert run["recoveredEntries"] == 3
+    assert run["alwaysActiveEntries"] == 1
+    assert run["entriesWithInferredKeys"] == 1
+    assert run["uniqueInferredKeys"] == 2
+    assert run["triggerPasses"][0]["newEntries"] == 3
+    assert run["triggerSearchProbes"] == 7
+    assert run["generateAttempts"] == 10
+    assert run["rateLimits"] == 1
 
 
 def test_new_visibility_replaces_stale_broad_attribution_sighting(tmp_path):

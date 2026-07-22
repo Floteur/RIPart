@@ -31,7 +31,7 @@ import click
 from .env import load_env as _load_env
 
 _INLINE_OUTPUT_LIMIT = 1_500  # longer results are sent as a file attachment instead
-_DESCRIPTION_CAP = 50  # Discord option description max; keep short for 8 KiB tree limit
+_DESCRIPTION_CAP = 46  # Keep the generated command tree safely below Discord's 8 KiB cap.
 _LOG = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
@@ -155,6 +155,7 @@ _PROVIDER_ACTIONS: dict[str, dict[str, str]] = {
         "login": "Open the JanitorAI login flow.",
         "import-session": "Import a JanitorAI session file.",
         "lorebook": "Index one JanitorAI lorebook.",
+        "benchmark-lorebook": "Benchmark reconstructed lore against a public book.",
         "inspect": "Inspect one character.",
         "extract": "Extract one JanitorAI character.",
         "list": "List recent JanitorAI characters.",

@@ -154,6 +154,74 @@ def _merge_referenced_characters(
     return merged
 
 
+def _recovery_run_summary(
+    result: dict[str, Any],
+    character_id: str,
+    now: str,
+    recovered: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Build a bounded, content-free extractor-regression observation."""
+    diagnostics = result.get("diagnostics")
+    if not isinstance(diagnostics, dict) or not diagnostics:
+        return None
+    contents = [
+        norm(str(item.get("content") or ""))
+        for item in recovered
+        if isinstance(item, dict) and str(item.get("content") or "").strip()
+    ]
+    triggers = {
+        str(trigger).strip().casefold()
+        for item in recovered
+        if isinstance(item, dict)
+        for trigger in item.get("inferredTriggers") or []
+        if str(trigger).strip()
+    }
+    generation = diagnostics.get("generation")
+    generation = generation if isinstance(generation, dict) else {}
+    passes = diagnostics.get("triggerPasses")
+    passes = passes if isinstance(passes, list) else []
+    return {
+        "capturedAt": now,
+        "characterId": character_id,
+        "contentFingerprint": hashlib.sha256(
+            "\n\n".join(contents).encode("utf-8")
+        ).hexdigest(),
+        "recoveredEntries": len(contents),
+        "alwaysActiveEntries": sum(
+            bool(item.get("alwaysActive"))
+            for item in recovered
+            if isinstance(item, dict)
+        ),
+        "entriesWithInferredKeys": sum(
+            bool(item.get("inferredTriggers"))
+            for item in recovered
+            if isinstance(item, dict)
+        ),
+        "uniqueInferredKeys": len(triggers),
+        "activationGroups": int(diagnostics.get("triggerActivationGroups") or 0),
+        "triggerPasses": [
+            {
+                key: trigger_pass.get(key)
+                for key in ("index", "chars", "entriesFound", "newEntries", "loreChars")
+                if trigger_pass.get(key) is not None
+            }
+            for trigger_pass in passes
+            if isinstance(trigger_pass, dict)
+        ],
+        "triggerSearchProbes": int(diagnostics.get("triggerSearchPasses") or 0),
+        "triggerSearchCandidates": int(
+            diagnostics.get("triggerSearchCandidates") or 0
+        ),
+        "triggerSearchMissLimit": int(
+            diagnostics.get("triggerSearchMissLimit") or 0
+        ),
+        "generateAttempts": int(generation.get("attempts") or 0),
+        "generateSucceeded": int(generation.get("succeeded") or 0),
+        "rateLimits": int(generation.get("rateLimits") or 0),
+        "generateElapsedMs": round(float(generation.get("elapsedMs") or 0), 3),
+    }
+
+
 def _write_unassigned_observations(
     library_dir: Path,
     source: str,
@@ -394,6 +462,12 @@ def _write_unassigned_observations(
             }
         record["recoveredWorldInfo"] = {"entries": recovered_entries}
         record["recoveredEntryCount"] = len(recovered_entries)
+        recovery_runs = record.get("recoveryRuns")
+        recovery_runs = recovery_runs if isinstance(recovery_runs, list) else []
+        recovery_run = _recovery_run_summary(result, character_id, now, recovered)
+        if recovery_run:
+            recovery_runs.append(recovery_run)
+            record["recoveryRuns"] = recovery_runs[-50:]
         record["updatedAt"] = now
         write_json(record_file, record)
     return str(path)

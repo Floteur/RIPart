@@ -805,6 +805,76 @@ def _public_entry_count(books: list[dict[str, Any]]) -> int:
     return len(_public_entry_contents(public_books))
 
 
+def _injectable_entries(book: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return a public book's entries the server would actually inject."""
+    entries = ((book.get("worldInfo") or {}).get("entries") or {}).values()
+    return [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and entry.get("enabled") is not False
+        and entry.get("disable") is not True
+    ]
+
+
+def _select_blind_benchmark_lorebooks(
+    books: list[dict[str, Any]], requested_id: str | None
+) -> list[dict[str, Any]]:
+    """Select injectable public books to withhold and score the capture against.
+
+    ``None`` disables the benchmark. An explicit id picks that one public book.
+    An empty string auto-selects *every* public book attached to the character,
+    so a multi-book character is benchmarked against the union of its open lore
+    without the caller having to name one with ``--reference``.
+    """
+    if requested_id is None:
+        return []
+    public = [book for book in books if book.get("isCodePublic") is True]
+    if requested_id:
+        public = [book for book in public if str(book.get("id") or "") == requested_id]
+        if len(public) != 1:
+            ids = [str(book.get("id") or "") for book in public]
+            raise RuntimeError(
+                "blind lorebook benchmark id matched "
+                f"{len(public)} public books ({', '.join(ids) or 'none'})"
+            )
+        target = public[0]
+        if not _injectable_entries(target):
+            total = len(((target.get("worldInfo") or {}).get("entries") or {}))
+            raise RuntimeError(
+                f"public lorebook {target.get('id')} cannot benchmark blind dumping: "
+                f"all {total} public entries are disabled and therefore never "
+                "appear in generateAlpha prompts"
+            )
+        return public
+    injectable = [book for book in public if _injectable_entries(book)]
+    if not injectable:
+        raise RuntimeError(
+            "blind lorebook benchmark requires at least one public book with "
+            f"injectable entries; found {len(public)} public book(s), none injectable"
+        )
+    return injectable
+
+
+def _merge_reference_books(books: list[dict[str, Any]]) -> dict[str, Any]:
+    """Union several public books into one benchmark reference record."""
+    if len(books) == 1:
+        return books[0]
+    entries: dict[str, Any] = {}
+    for book in books:
+        book_id = str(book.get("id") or "")
+        for uid, entry in ((book.get("worldInfo") or {}).get("entries") or {}).items():
+            entries[f"{book_id}:{uid}"] = entry
+    return {
+        "id": "+".join(str(book.get("id") or "") for book in books),
+        "title": " + ".join(
+            str(book.get("title") or "") for book in books if book.get("title")
+        ),
+        "entryCount": len(entries),
+        "worldInfo": {"entries": entries},
+    }
+
+
 def _trigger_search_matches(
     found_entries: list[str],
     recovered_entries: list[str],
@@ -1754,6 +1824,7 @@ def _extract_character(
     find_triggers: bool,
     max_trigger_search_passes: int,
     trigger_search_miss_limit: int,
+    blind_lorebook_benchmark_id: str | None,
     settle: float,
     delete_chat_on_error: bool,
     verbose: int,
@@ -1861,7 +1932,17 @@ def _extract_character(
             meta = _fetch_json(driver, f"{ORIGIN}/hampter/characters/{character_id}")
         proxy_forbidden = meta.get("allow_proxy") is False
         public_lorebooks = _fetch_public_lorebooks(driver, meta)
-        public_contents = _public_entry_contents(public_lorebooks)
+        blind_references = _select_blind_benchmark_lorebooks(
+            public_lorebooks, blind_lorebook_benchmark_id
+        )
+        withheld = {id(book) for book in blind_references}
+        blind_reference = (
+            _merge_reference_books(blind_references) if blind_references else None
+        )
+        visible_public_lorebooks = [
+            book for book in public_lorebooks if id(book) not in withheld
+        ]
+        public_contents = _public_entry_contents(visible_public_lorebooks)
         has_lorebook = bool(_lorebook_refs(meta))
         # A lorebook is "closed" (only generateAlpha can reveal it) unless every
         # attached book came back fully accessible from the script endpoint.
@@ -1873,6 +1954,11 @@ def _extract_character(
             has_closed_lore = any(
                 not book.get("accessible") for book in public_lorebooks
             )
+        if blind_reference:
+            # Force the normal generateAlpha path even when every real book is
+            # readable: the selected public book is intentionally treated as
+            # hidden until the post-capture scorer runs.
+            has_closed_lore = True
 
         definition_in_meta = bool(
             (meta.get("personality") or "").strip()
@@ -1889,6 +1975,12 @@ def _extract_character(
             f"public_books={_public_lorebook_count(public_lorebooks)} "
             f"readable_entries={len(public_contents)} "
             f"closed_books={closed_book_count}"
+            + (
+                f" blind_target={blind_reference.get('id')} "
+                f"withheld_entries={blind_reference.get('entryCount', 0)}"
+                if blind_reference
+                else ""
+            )
         )
 
         # Start the avatar download now so it overlaps the generateAlpha passes.
@@ -2046,19 +2138,27 @@ def _extract_character(
                 "could not find the character card in the probe response"
             )
 
-        # Only run the lorebook trigger passes when the character actually has a
-        # lorebook attached (meta.scripts); otherwise the probe alone gives the card.
-        if has_lorebook:
+        # Only leak lore that is actually closed. When every attached book is
+        # code-public the /script endpoint already returned all entries with
+        # their real keys, so the trigger passes + trigger-search would only
+        # re-chunk the same public lore and invent junk keys for it.
+        if has_closed_lore:
             trigger_messages = build_lorebook_trigger_messages(
                 meta,
                 card,
-                public_lorebooks,
+                visible_public_lorebooks,
                 chunk_size=chunk_size,
             )[:max_trigger_passes]
             if not trigger_messages:
                 trigger_messages = [card]
         else:
-            _clog("no lorebook attached; skipping trigger passes")
+            if has_lorebook:
+                _clog(
+                    "lorebook fully public; using script entries directly "
+                    "(no generateAlpha leak, no trigger search)"
+                )
+            else:
+                _clog("no lorebook attached; skipping trigger passes")
             trigger_messages = []
 
         separations: list[dict[str, Any]] = []
@@ -2066,7 +2166,7 @@ def _extract_character(
         discovered_entries: set[str] = set()
         full_payload = probe_payload
 
-        if has_lorebook:
+        if has_closed_lore:
             for index, trigger_text in enumerate(trigger_messages):
                 label = "full" if index == 0 else f"trigger-{index + 1}"
                 _clog(
@@ -2093,6 +2193,7 @@ def _extract_character(
                         "index": index + 1,
                         "chars": len(trigger_text),
                         "entriesFound": len(separated_pass.get("entries") or []),
+                        "newEntries": len(new_entries),
                         "loreChars": len(separated_pass.get("lorebookText") or ""),
                     }
                 )
@@ -2237,6 +2338,7 @@ def _extract_character(
             "recoveredTriggerGroups": _trigger_activation_groups(
                 recovered_triggers
             ),
+            "benchmarkReferenceLorebook": blind_reference,
         }
         if verbose:
             result["diagnostics"] = {
@@ -2346,6 +2448,11 @@ def extract_task(driver, data):
             trigger_search_miss_limit=max(
                 0, int(data.get("trigger_search_miss_limit", 8))
             ),
+            blind_lorebook_benchmark_id=(
+                str(data.get("blind_lorebook_benchmark_id") or "")
+                if "blind_lorebook_benchmark_id" in data
+                else None
+            ),
             settle=max(0.0, float(data.get("trigger_settle_ms") or 0) / 1000.0),
             delete_chat_on_error=bool(data.get("delete_chat_on_error")),
             verbose=verbose,
@@ -2433,6 +2540,11 @@ def recent_task(driver, data):
     trigger_search_miss_limit = max(
         0, int(data.get("trigger_search_miss_limit", 8))
     )
+    blind_lorebook_benchmark_id = (
+        str(data.get("blind_lorebook_benchmark_id") or "")
+        if "blind_lorebook_benchmark_id" in data
+        else None
+    )
     settle = max(0.0, float(data.get("trigger_settle_ms") or 0) / 1000.0)
     delete_chat_on_error = bool(data.get("delete_chat_on_error"))
 
@@ -2460,6 +2572,7 @@ def recent_task(driver, data):
                 find_triggers=find_triggers,
                 max_trigger_search_passes=max_trigger_search_passes,
                 trigger_search_miss_limit=trigger_search_miss_limit,
+                blind_lorebook_benchmark_id=blind_lorebook_benchmark_id,
                 settle=settle,
                 delete_chat_on_error=delete_chat_on_error,
                 verbose=verbose,

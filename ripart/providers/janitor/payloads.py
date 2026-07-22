@@ -195,7 +195,10 @@ def build_lorebook_trigger_messages(
     primary = f"{card}\n\n{first_message}" if first_message else card
     candidates: list[str] = []
     if primary.strip():
-        candidates.append(primary.strip())
+        # Echoed cards can already contain recursively activated lore and grow
+        # into hundreds of kilobytes.  Never let the privileged first pass
+        # bypass the same request-size bound used by every other source.
+        candidates.extend(split_text_chunks(primary, chunk_size))
 
     catalog = html_to_text(str(meta.get("description") or ""))
     candidates.extend(split_text_chunks(catalog, chunk_size))
