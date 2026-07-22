@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Datacat Bulk JanitorAI Character Retriever
 // @namespace    https://greasyfork.org/users/1622561-flonz
-// @version      1.5.2
+// @version      1.5.3
 // @description  Collect character UUIDs from JanitorAI pages and bulk-retrieve them through Datacat with retries, persistence, and result export.
 // @author       Flo
 // @license      MIT
@@ -53,6 +53,7 @@
     const tabKey = `${SHARED_KEY_PREFIX}tab:${TAB_ID}`;
     const tabsRevisionKey = `${SHARED_KEY_PREFIX}tabs-revision`;
     const janitorRevisionKey = `${SHARED_KEY_PREFIX}janitor-revision`;
+    const janitorClearKey = `${SHARED_KEY_PREFIX}janitor-clear`;
     const workerLeaseKey = `${SHARED_KEY_PREFIX}worker-lease`;
     const sharedJobKey = `${SHARED_KEY_PREFIX}job`;
     const datacatInputKey = `${SHARED_KEY_PREFIX}datacat-input`;
@@ -75,6 +76,7 @@
 
     function activeJanitorIds() {
         const now = Date.now();
+        const clearedAt = GM_getValue(janitorClearKey, null)?.at || 0;
         const ids = new Set();
         for (const key of GM_listValues()) {
             if (!key.startsWith(`${SHARED_KEY_PREFIX}tab:`)) continue;
@@ -83,7 +85,10 @@
                 tab?.role !== "janitor" ||
                 !Array.isArray(tab.ids) ||
                 !Number.isFinite(tab.seenAt) ||
-                now - tab.seenAt > TAB_TTL_MS
+                now - tab.seenAt > TAB_TTL_MS ||
+                (clearedAt > 0 &&
+                    (!Number.isFinite(tab.idsUpdatedAt) ||
+                        tab.idsUpdatedAt < clearedAt))
             ) continue;
             for (const id of tab.ids) if (typeof id === "string") ids.add(id);
         }
@@ -106,8 +111,23 @@
     }
 
     function publishJanitorIds(ids) {
-        touchTab({ ids: [...ids] });
+        touchTab({ ids: [...ids], idsUpdatedAt: Date.now() });
         GM_setValue(janitorRevisionKey, { id: TAB_ID, at: Date.now() });
+    }
+
+    function clearPublishedJanitorIds(clearedAt) {
+        for (const key of GM_listValues()) {
+            if (!key.startsWith(`${SHARED_KEY_PREFIX}tab:`)) continue;
+            const tab = GM_getValue(key, null);
+            if (tab?.role === "janitor") {
+                GM_setValue(key, {
+                    ...tab,
+                    ids: [],
+                    idsUpdatedAt: clearedAt,
+                    seenAt: Date.now()
+                });
+            }
+        }
     }
 
     function getWorkerLease() {
@@ -166,6 +186,7 @@
     function mountJanitorCollector() {
         const collectedIds = new Set();
         let scanIntervalId = null;
+        let scanGeneration = 0;
         let lastScanAdded = 0;
         let savedPosition = null;
 
@@ -173,10 +194,16 @@
             const saved = JSON.parse(
                 localStorage.getItem(JANITOR_COLLECTOR_STORAGE_KEY) || "{}"
             );
-            for (const id of Array.isArray(saved.ids) ? saved.ids : []) {
-                if (typeof id !== "string") continue;
-                const uuid = uuidFromValue(id);
-                if (uuid === id.toLowerCase()) collectedIds.add(uuid);
+            const clearedAt = GM_getValue(janitorClearKey, null)?.at || 0;
+            if (
+                clearedAt === 0 ||
+                (Number.isFinite(saved.updatedAt) && saved.updatedAt >= clearedAt)
+            ) {
+                for (const id of Array.isArray(saved.ids) ? saved.ids : []) {
+                    if (typeof id !== "string") continue;
+                    const uuid = uuidFromValue(id);
+                    if (uuid === id.toLowerCase()) collectedIds.add(uuid);
+                }
             }
             if (
                 Number.isFinite(saved.position?.left) &&
@@ -351,7 +378,11 @@
             savedPosition = position;
             localStorage.setItem(
                 JANITOR_COLLECTOR_STORAGE_KEY,
-                JSON.stringify({ ids: [...collectedIds], position: savedPosition })
+                JSON.stringify({
+                    ids: [...collectedIds],
+                    position: savedPosition,
+                    updatedAt: Date.now()
+                })
             );
             publishJanitorIds(collectedIds);
         }
@@ -376,6 +407,30 @@
 
         GM_addValueChangeListener(janitorRevisionKey, (_key, _old, _value, remote) => {
             if (remote) syncFromPeers();
+        });
+
+        function clearCollector({ broadcast = true } = {}) {
+            // Announce before publishing the empty set so peers clear their
+            // in-memory copies instead of merging stale IDs back in.
+            if (broadcast) {
+                const clearedAt = Date.now();
+                clearPublishedJanitorIds(clearedAt);
+                GM_setValue(janitorClearKey, { id: TAB_ID, at: clearedAt });
+            }
+            if (scanIntervalId !== null) {
+                clearInterval(scanIntervalId);
+                scanIntervalId = null;
+                scanButton.textContent = "Scan page";
+            }
+            scanGeneration++;
+            collectedIds.clear();
+            lastScanAdded = 0;
+            persistCollectorState();
+            refreshOutput();
+        }
+
+        GM_addValueChangeListener(janitorClearKey, (_key, _old, _value, remote) => {
+            if (remote) clearCollector({ broadcast: false });
         });
 
         function scanPage({ refreshWhenUnchanged = false } = {}) {
@@ -473,12 +528,16 @@
             if (scanIntervalId !== null) {
                 clearInterval(scanIntervalId);
                 scanIntervalId = null;
+                scanGeneration++;
                 scanButton.textContent = "Scan page";
                 refreshOutput();
                 return;
             }
 
-            scanIntervalId = setInterval(scanPage, 500);
+            const generation = ++scanGeneration;
+            scanIntervalId = setInterval(() => {
+                if (generation === scanGeneration) scanPage();
+            }, 500);
             scanButton.textContent = "Stop scanning";
             refreshOutput();
             scanPage();
@@ -497,10 +556,7 @@
         });
         sendButton.addEventListener("click", sendToDatacat);
         clearButton.addEventListener("click", () => {
-            collectedIds.clear();
-            lastScanAdded = 0;
-            persistCollectorState();
-            refreshOutput();
+            clearCollector();
         });
         toggleButton.addEventListener("click", () => {
             const minimised = panel.classList.toggle("minimised");
