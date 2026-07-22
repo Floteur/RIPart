@@ -77,7 +77,9 @@ class HttpClient:
     def trace_preview(self, value: Any, limit: int = 800) -> str:
         text = value if isinstance(value, str) else json.dumps(value, default=str)
         text = " ".join(text.split())
-        return text if len(text) <= limit else f"{text[:limit]}… ({len(text)} chars total)"
+        return (
+            text if len(text) <= limit else f"{text[:limit]}… ({len(text)} chars total)"
+        )
 
     def _retry_delay(self, response: httpx.Response, attempt: int) -> float:
         retry_after = response.headers.get("Retry-After")

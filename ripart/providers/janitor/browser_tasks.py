@@ -627,7 +627,9 @@ def _start_avatar_download(driver, url: str) -> bool:
     if not url:
         return False
     try:
-        driver.run_js(f"window.__ripAvatarPromise = {_AVATAR_FETCH_JS};\nreturn true;", url)
+        driver.run_js(
+            f"window.__ripAvatarPromise = {_AVATAR_FETCH_JS};\nreturn true;", url
+        )
         return True
     except Exception:
         return False
@@ -837,6 +839,7 @@ def _recover_chat_greetings(driver, chat_id: str, meta: dict[str, Any]) -> None:
     character = chat.get("character") if isinstance(chat, dict) else None
     if not isinstance(character, dict):
         return
+
     def _blank(value: Any) -> bool:
         return not (value.strip() if isinstance(value, str) else value)
 
@@ -1305,7 +1308,9 @@ def inspect_task(driver, data):
         else f"{ORIGIN}/characters/{character_id}"
     )
     if not _open_authed_context(driver):
-        raise RuntimeError("Not logged into JanitorAI. Run `uv run rip janitor login` first.")
+        raise RuntimeError(
+            "Not logged into JanitorAI. Run `uv run rip janitor login` first."
+        )
     _export_session(driver)
     meta = _fetch_json(driver, f"{ORIGIN}/hampter/characters/{character_id}")
     public_lorebooks = _fetch_public_lorebooks(driver, meta)
@@ -1329,12 +1334,12 @@ def lorebook_task(driver, data):
     if not lorebook_id:
         raise ValueError("lorebook_id is required")
     if not _open_authed_context(driver):
-        raise RuntimeError("Not logged into JanitorAI. Run `uv run rip janitor login` first.")
+        raise RuntimeError(
+            "Not logged into JanitorAI. Run `uv run rip janitor login` first."
+        )
     _export_session(driver)
     response = _authed_fetch(driver, f"{ORIGIN}/hampter/script/{lorebook_id}")
-    book = _public_lorebook_from_response(
-        {"id": lorebook_id, "title": ""}, response
-    )
+    book = _public_lorebook_from_response({"id": lorebook_id, "title": ""}, response)
     if book.get("error"):
         raise RuntimeError(f"lorebook fetch failed: {book['error']}")
     return {
@@ -1488,7 +1493,9 @@ def _leak_definition_via_janitor(
             profile, chat_id, character_id, messages, persona, user_config=user_config
         )
         pacer.wait()
-        clog(f"leak pass {attempt + 1}/{passes} request: {_trace_preview(body)}", level=3)
+        clog(
+            f"leak pass {attempt + 1}/{passes} request: {_trace_preview(body)}", level=3
+        )
         started = time.monotonic()
         result = _post_generate_alpha(driver, body, chat_id)
         elapsed_ms = (time.monotonic() - started) * 1000
@@ -1504,7 +1511,10 @@ def _leak_definition_via_janitor(
             continue
         pacer.on_success()
         text = _parse_janitor_completion(result.get("body") or "")
-        clog(f"leak pass {attempt + 1}/{passes} response: {_trace_preview(result.get('body') or '')}", level=3)
+        clog(
+            f"leak pass {attempt + 1}/{passes} response: {_trace_preview(result.get('body') or '')}",
+            level=3,
+        )
         if text.strip():
             dumps.append(text)
             clog(f"leak pass {attempt + 1}/{passes}: {len(text)} chars")
@@ -1885,7 +1895,9 @@ def _extract_character(
                     :max_trigger_search_passes
                 ]
                 known_entries = {
-                    _norm(entry): entry for entry in separated["entries"] if _norm(entry)
+                    _norm(entry): entry
+                    for entry in separated["entries"]
+                    if _norm(entry)
                 }
                 _clog(f"testing {len(candidates)} candidate lorebook triggers")
                 for index, (candidate, trigger_text) in enumerate(candidates, 1):
@@ -1894,13 +1906,19 @@ def _extract_character(
                             trigger_text, label=f"trigger-search-{index}"
                         )
                     except Exception as exc:
-                        _clog(f"warning: trigger search {index} failed, skipping: {exc}")
+                        _clog(
+                            f"warning: trigger search {index} failed, skipping: {exc}"
+                        )
                         continue
-                    found = separate(payload, card, public_contents).get("entries") or []
+                    found = (
+                        separate(payload, card, public_contents).get("entries") or []
+                    )
                     found_keys = {_norm(entry) for entry in found}
                     for entry_key in known_entries:
                         if entry_key in found_keys:
-                            recovered_triggers.setdefault(entry_key, []).append(candidate)
+                            recovered_triggers.setdefault(entry_key, []).append(
+                                candidate
+                            )
         else:
             # A generateAlpha echo contains the full assembled prompt. Without
             # an attached script there is no evidence that text outside the card
@@ -1975,7 +1993,9 @@ def extract_task(driver, data):
 
     _extract_log(f"extracting {char_url}", verbose=verbose)
     if not _open_authed_context(driver):
-        raise RuntimeError("Not logged into JanitorAI. Run `uv run rip janitor login` first.")
+        raise RuntimeError(
+            "Not logged into JanitorAI. Run `uv run rip janitor login` first."
+        )
     _export_session(driver)
 
     # Fetch profile + meta once; the character's allow_proxy decides which mode
@@ -2049,7 +2069,9 @@ def recent_task(driver, data):
     mode = "sfw" if data.get("sfw") else "all"
 
     if not _open_authed_context(driver):
-        raise RuntimeError("Not logged into JanitorAI. Run `uv run rip janitor login` first.")
+        raise RuntimeError(
+            "Not logged into JanitorAI. Run `uv run rip janitor login` first."
+        )
     _export_session(driver)
 
     cards = _fetch_recent(driver, limit, mode)
@@ -2099,9 +2121,7 @@ def recent_task(driver, data):
     chunk_size = int(data.get("trigger_chunk_size") or 2500)
     max_trigger_passes = max(1, int(data.get("max_trigger_passes") or 8))
     find_triggers = bool(data.get("find_triggers"))
-    max_trigger_search_passes = max(
-        1, int(data.get("max_trigger_search_passes") or 48)
-    )
+    max_trigger_search_passes = max(1, int(data.get("max_trigger_search_passes") or 48))
     settle = max(0.0, float(data.get("trigger_settle_ms") or 0) / 1000.0)
     delete_chat_on_error = bool(data.get("delete_chat_on_error"))
 
@@ -2164,7 +2184,8 @@ def recent_task(driver, data):
                 except Exception as exc:  # noqa: BLE001 - final save can retry below
                     entry["checkpoint_error"] = str(exc)
                     _extract_log(
-                        f"warning: could not checkpoint {card['id']}: {exc}", verbose=verbose
+                        f"warning: could not checkpoint {card['id']}: {exc}",
+                        verbose=verbose,
                     )
             return entry
         except Exception as exc:  # noqa: BLE001 - one bad card must not abort the batch

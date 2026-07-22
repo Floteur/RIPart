@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from ripart.common.text import normalize_sillytavern_identity_macros, normalize_user_placeholder
+from ripart.common.text import (
+    normalize_sillytavern_identity_macros,
+    normalize_user_placeholder,
+)
 from ripart.providers.janitor.payloads import (
     build_character,
     build_trigger_search_messages,
@@ -30,9 +33,10 @@ def test_split_entries_keeps_headings_with_their_block():
 
 
 def test_normalize_user_placeholder_collapses_any_brace_count():
-    assert normalize_user_placeholder(
-        "{user} {{user}} {{{user}}} {{{{{user}}}}}"
-    ) == "{{user}} {{user}} {{user}} {{user}}"
+    assert (
+        normalize_user_placeholder("{user} {{user}} {{{user}}} {{{{{user}}}}}")
+        == "{{user}} {{user}} {{user}} {{user}}"
+    )
 
 
 def test_normalize_user_placeholder_preserves_other_sillytavern_macros():
@@ -44,9 +48,12 @@ def test_normalize_user_placeholder_preserves_other_sillytavern_macros():
 
 
 def test_identity_macro_normaliser_repairs_char_and_legacy_aliases():
-    assert normalize_sillytavern_identity_macros(
-        "{char} {{{bot}}} <USER> <BOT> <CHAR> {MYOS}"
-    ) == "{{char}} {{char}} {{user}} {{char}} {{char}} {MYOS}"
+    assert (
+        normalize_sillytavern_identity_macros(
+            "{char} {{{bot}}} <USER> <BOT> <CHAR> {MYOS}"
+        )
+        == "{{char}} {{char}} {{user}} {{char}} {{char}} {MYOS}"
+    )
 
 
 def test_janitor_card_and_lorebook_text_use_sillytavern_user_macro():

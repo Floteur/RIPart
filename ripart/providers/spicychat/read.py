@@ -125,7 +125,9 @@ def search_characters(
             content=json.dumps(payload),
         )
     except httpx.HTTPError as exc:
-        raise SpicyChatError(f"network error talking to spicychat.ai search: {exc}") from exc
+        raise SpicyChatError(
+            f"network error talking to spicychat.ai search: {exc}"
+        ) from exc
     if response.is_error:
         raise SpicyChatError(
             f"spicychat.ai search returned {response.status_code}", response.status_code

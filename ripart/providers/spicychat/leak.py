@@ -109,7 +109,9 @@ def create_conversation(character_id: str) -> str:
     try:
         data = response.json()
     except ValueError as exc:
-        raise SpicyChatError("spicychat.ai returned non-JSON opening a conversation") from exc
+        raise SpicyChatError(
+            "spicychat.ai returned non-JSON opening a conversation"
+        ) from exc
     conversation_id = str((data or {}).get("id") or "").strip()
     if not conversation_id:
         raise SpicyChatError("spicychat.ai returned no conversation id")
@@ -281,7 +283,7 @@ _FIELD_LABELS = (
 )
 
 # Openers of an in-character narrative reply (an action/dialogue line).
-_RP_OPENERS = ('*', '"', "'", "“", "‘", "—")
+_RP_OPENERS = ("*", '"', "'", "“", "‘", "—")
 
 
 def _looks_like_definition(text: str) -> bool:

@@ -60,7 +60,11 @@ def set_chat_llm_provider(
 def _last_assistant_id(chat_id: str) -> str | None:
     """The id of the most recent assistant message in the chat (branch point)."""
     for msg in reversed(get_chat_messages(chat_id)):
-        if isinstance(msg, dict) and msg.get("message_type") == "assistant" and msg.get("id"):
+        if (
+            isinstance(msg, dict)
+            and msg.get("message_type") == "assistant"
+            and msg.get("id")
+        ):
             return str(msg["id"])
     return None
 

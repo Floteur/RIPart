@@ -99,7 +99,10 @@ def _split_echo_definition(text: str) -> dict[str, str]:
     example: list[str] = []
     lore: list[str] = []
     for i, m in enumerate(heads):
-        start, end = m.end(), (heads[i + 1].start() if i + 1 < len(heads) else len(text))
+        start, end = (
+            m.end(),
+            (heads[i + 1].start() if i + 1 < len(heads) else len(text)),
+        )
         content = text[start:end].strip()
         kind = _classify_echo_section(m.group(1))
         if kind == "example":

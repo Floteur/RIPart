@@ -29,7 +29,9 @@ def test_parse_command_uses_shell_style_quoting_without_a_shell():
     ]
 
 
-@pytest.mark.parametrize("command", ["", "   ", "discord-bot", "discord-bot --anything"])
+@pytest.mark.parametrize(
+    "command", ["", "   ", "discord-bot", "discord-bot --anything"]
+)
 def test_parse_command_rejects_empty_and_recursive_commands(command):
     with pytest.raises(ValueError):
         parse_command(command)
@@ -40,7 +42,9 @@ def test_parse_command_does_not_interpret_shell_metacharacters():
 
 
 def test_action_argv_only_requires_the_action_arguments():
-    assert action_argv(("saucepan",), "extract", '"https://example.test/card" --no-lorebooks') == [
+    assert action_argv(
+        ("saucepan",), "extract", '"https://example.test/card" --no-lorebooks'
+    ) == [
         "saucepan",
         "extract",
         "https://example.test/card",
@@ -56,8 +60,15 @@ def test_extract_uses_a_required_uuid_field_and_typed_options():
     assert uuid.annotation is str
     assert uuid.required
     assert uuid.positional
-    assert {option.name for option in options} >= {"leak", "trigger_message", "max_triggers"}
-    assert next(option for option in options if option.name == "max_triggers").annotation is int
+    assert {option.name for option in options} >= {
+        "leak",
+        "trigger_message",
+        "max_triggers",
+    }
+    assert (
+        next(option for option in options if option.name == "max_triggers").annotation
+        is int
+    )
 
 
 def test_typed_discord_fields_build_the_expected_cli_argv():
@@ -74,7 +85,9 @@ def test_no_argument_action_has_no_discord_fields():
 
 def test_logout_actions_are_limited_to_the_designated_owner():
     admin_ids = {566580404279181341, 42}
-    assert action_allowed(action="logout", user_id=566580404279181341, admin_ids=admin_ids)
+    assert action_allowed(
+        action="logout", user_id=566580404279181341, admin_ids=admin_ids
+    )
     assert action_allowed(action="logout", user_id=42, admin_ids=admin_ids)
     assert not action_allowed(action="logout", user_id=1, admin_ids=admin_ids)
     assert action_allowed(action="status", user_id=1, admin_ids=admin_ids)

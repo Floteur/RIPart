@@ -27,7 +27,9 @@ def _source_name(source_url: str) -> str:
 
 def _entries(book: dict[str, Any]) -> dict[str, dict[str, Any]]:
     raw = (book.get("worldInfo") or {}).get("entries") or {}
-    values = raw.values() if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+    values = (
+        raw.values() if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+    )
     entries: dict[str, dict[str, Any]] = {}
     for uid, entry in enumerate(values):
         if not isinstance(entry, dict):
@@ -199,7 +201,9 @@ def _write_unassigned_observations(
         fingerprint = hashlib.sha256(norm(content).encode("utf-8")).hexdigest()
         item = evidence_items.get(fingerprint)
         item = item if isinstance(item, dict) else {}
-        sightings = item.get("sightings") if isinstance(item.get("sightings"), list) else []
+        sightings = (
+            item.get("sightings") if isinstance(item.get("sightings"), list) else []
+        )
         sighting = {
             "characterId": character_id,
             "candidateLorebookIds": candidate_ids,
@@ -226,7 +230,9 @@ def _write_unassigned_observations(
             "updatedAt": now,
         }
         evidence_items[fingerprint] = item
-        triggers = trigger_map.get(norm(content), []) if isinstance(trigger_map, dict) else []
+        triggers = (
+            trigger_map.get(norm(content), []) if isinstance(trigger_map, dict) else []
+        )
         observation = {
             "content": content,
             "contentFingerprint": fingerprint,
@@ -322,7 +328,11 @@ def _write_unassigned_observations(
             continue
         recovered = record.get("recoveredObservations")
         recovered = recovered if isinstance(recovered, list) else []
-        known = {str(item.get("contentFingerprint") or "") for item in recovered if isinstance(item, dict)}
+        known = {
+            str(item.get("contentFingerprint") or "")
+            for item in recovered
+            if isinstance(item, dict)
+        }
         recovered.extend(
             item for item in items if item["contentFingerprint"] not in known
         )
@@ -344,7 +354,9 @@ def update_lorebook_library(
     observations leave one compatible attached lorebook.
     """
     source = _source_name(str(result.get("url") or ""))
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    now = (
+        datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    )
     written: list[str] = []
     attached_lorebook_ids: list[str] = []
     for book in result.get("publicLorebooks") or []:
@@ -364,10 +376,14 @@ def update_lorebook_library(
         identity = source_id or f"content-{fingerprint}"
         path = _record_path(library_dir, source, identity)
         try:
-            existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            existing = (
+                json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            )
         except (OSError, json.JSONDecodeError):
             existing = {}
-        character_ids = existing.get("characterIds") if isinstance(existing, dict) else []
+        character_ids = (
+            existing.get("characterIds") if isinstance(existing, dict) else []
+        )
         if not isinstance(character_ids, list):
             character_ids = []
         character_ids = [str(value) for value in character_ids if str(value).strip()]
@@ -399,7 +415,9 @@ def update_lorebook_library(
             # they have already been captured locally.
             "referencedCharacters": referenced_characters,
             "recoveredObservations": recovered_observations,
-            "firstSeenAt": existing.get("firstSeenAt", now) if isinstance(existing, dict) else now,
+            "firstSeenAt": existing.get("firstSeenAt", now)
+            if isinstance(existing, dict)
+            else now,
             "updatedAt": now,
         }
         write_json(path, record)

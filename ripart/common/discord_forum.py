@@ -167,7 +167,11 @@ def _embed_for(
             "value": "yes" if (meta or {}).get("is_nsfw") else "no",
             "inline": True,
         },
-        {"name": "Definition", "value": source[:_EMBED_FIELD_VALUE_CAP], "inline": True},
+        {
+            "name": "Definition",
+            "value": source[:_EMBED_FIELD_VALUE_CAP],
+            "inline": True,
+        },
     ]
     if url:
         fields.append(
@@ -239,7 +243,9 @@ def _detail_embeds_for(result: dict[str, Any]) -> list[dict[str, Any]]:
     for title, content in sections:
         chunks = _split_embed_text(content)
         for index, chunk in enumerate(chunks, start=1):
-            chunk_title = title if len(chunks) == 1 else f"{title} ({index}/{len(chunks)})"
+            chunk_title = (
+                title if len(chunks) == 1 else f"{title} ({index}/{len(chunks)})"
+            )
             embeds.append(
                 {
                     "title": chunk_title[:_EMBED_TITLE_CAP],
@@ -288,7 +294,9 @@ def _lorebook_files_for(
         book = build_character_book(None, [public_book])
         if book:
             book["name"] = str(
-                public_book.get("title") or public_book.get("name") or f"Public book {index}"
+                public_book.get("title")
+                or public_book.get("name")
+                or f"Public book {index}"
             )
         _encode(f"{character_id}-public-lorebook-{index}.json", book)
 
@@ -391,10 +399,12 @@ class ForumPublisher:
                     delay = float(retry_after) if retry_after else 1.0
                 except ValueError:
                     delay = 1.0
-                backoff = min(delay + (2 ** attempt) + _random.uniform(0, 0.5), 30.0)
+                backoff = min(delay + (2**attempt) + _random.uniform(0, 0.5), 30.0)
                 _LOG.warning(
                     "rate limited (attempt %d/%d), retrying in %.1fs",
-                    attempt + 1, attempts, backoff,
+                    attempt + 1,
+                    attempts,
+                    backoff,
                 )
                 time.sleep(backoff)
                 continue
@@ -444,9 +454,7 @@ class ForumPublisher:
                 self._record(found, thread, pattern)
             if not body.get("has_more") or not threads:
                 break
-            before = (threads[-1].get("thread_metadata") or {}).get(
-                "archive_timestamp"
-            )
+            before = (threads[-1].get("thread_metadata") or {}).get("archive_timestamp")
             if not before:
                 break
         return found
@@ -522,7 +530,9 @@ class ForumPublisher:
         )
         if resp.status_code in (200, 201):
             return resp.json()
-        raise RuntimeError(f"create_file_post HTTP {resp.status_code}: {resp.text[:200]}")
+        raise RuntimeError(
+            f"create_file_post HTTP {resp.status_code}: {resp.text[:200]}"
+        )
 
     def reply(
         self, thread_id: str, *, embed: dict[str, Any], png_path: Path
@@ -675,17 +685,33 @@ class ForumPublisher:
         record_bytes = json.dumps(record, ensure_ascii=False, indent=2).encode("utf-8")
         entry_count = record.get("entryCount", 0)
         fields = [
-            {"name": "Source", "value": str(record.get("source") or "unknown"), "inline": True},
+            {
+                "name": "Source",
+                "value": str(record.get("source") or "unknown"),
+                "inline": True,
+            },
             {"name": "Entries", "value": str(entry_count), "inline": True},
-            {"name": "Updated", "value": str(record.get("updatedAt") or "unknown"), "inline": False},
+            {
+                "name": "Updated",
+                "value": str(record.get("updatedAt") or "unknown"),
+                "inline": False,
+            },
         ]
         if record.get("sourceLorebookId"):
             fields.append(
-                {"name": "Provider lorebook ID", "value": str(record["sourceLorebookId"]), "inline": False}
+                {
+                    "name": "Provider lorebook ID",
+                    "value": str(record["sourceLorebookId"]),
+                    "inline": False,
+                }
             )
         if record.get("characterIds"):
             fields.append(
-                {"name": "Captured characters", "value": str(len(record["characterIds"])), "inline": True}
+                {
+                    "name": "Captured characters",
+                    "value": str(len(record["characterIds"])),
+                    "inline": True,
+                }
             )
         embed = {
             "title": title[:_EMBED_TITLE_CAP],
@@ -774,7 +800,9 @@ def publish_card(
         return {"action": "error", "uuid": character_id, "error": str(exc)}
 
 
-def publish_saved_card(character_id: str, result: dict[str, Any], paths: dict[str, Any]) -> dict[str, Any]:
+def publish_saved_card(
+    character_id: str, result: dict[str, Any], paths: dict[str, Any]
+) -> dict[str, Any]:
     """Explicit post-save event that publishes a card and its lorebooks."""
     outcome = publish_card(character_id, result, Path(paths["png"]))
     if outcome and outcome.get("thread_id"):
@@ -838,8 +866,12 @@ def _is_fully_attributed_observation_record(path: Path, record: dict[str, Any]) 
     if not isinstance(observations, list) or not observations:
         return False
     for observation in observations:
-        attribution = observation.get("attribution") if isinstance(observation, dict) else None
-        candidates = attribution.get("candidates") if isinstance(attribution, dict) else None
+        attribution = (
+            observation.get("attribution") if isinstance(observation, dict) else None
+        )
+        candidates = (
+            attribution.get("candidates") if isinstance(attribution, dict) else None
+        )
         if not (
             isinstance(attribution, dict)
             and attribution.get("status") == "inferred"

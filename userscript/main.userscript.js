@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Datacat Bulk JanitorAI Character Retriever
 // @namespace    https://greasyfork.org/users/1622561-flonz
-// @version      1.5.1
+// @version      1.5.2
 // @description  Collect character UUIDs from JanitorAI pages and bulk-retrieve them through Datacat with retries, persistence, and result export.
 // @author       Flo
 // @license      MIT
@@ -37,7 +37,7 @@
     pageWindow.__datacatJanitorToolsLoaded = true;
     pageWindow.__datacatBulkRetrieverLoaded = true;
 
-    const SCRIPT_VERSION = "1.5.1";
+    const SCRIPT_VERSION = "1.5.2";
     const UUID_PATTERN =
         /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     const JANITOR_COLLECTOR_STORAGE_KEY = "datacat_janitor_uuid_collector_v1";
@@ -280,6 +280,7 @@
                 panel.style.left = `${Math.max(0, savedPosition.left)}px`;
                 panel.style.top = `${Math.max(0, savedPosition.top)}px`;
             }
+            keepCollectorVisible();
             refreshOutput();
             syncFromPeers();
             publishJanitorIds(collectedIds);
@@ -297,6 +298,13 @@
                 top: Math.round(rect.top)
             })
         );
+
+        function keepCollectorVisible() {
+            const position = clampPanelToViewport(panel);
+            if (position) persistCollectorState(position);
+        }
+
+        pageWindow.addEventListener("resize", keepCollectorVisible);
 
         function uuidFromValue(value) {
             const match = String(value || "").match(UUID_PATTERN);
@@ -373,7 +381,10 @@
         function scanPage({ refreshWhenUnchanged = false } = {}) {
             const before = collectedIds.size;
 
-            for (const link of document.querySelectorAll('a[href*="/characters/"]')) {
+            // Janitor uses both relative and absolute links depending on the
+            // page/view. Let uuidFromCharacterLink validate the origin and
+            // path instead of relying on a particular href representation.
+            for (const link of document.querySelectorAll("a[href]")) {
                 const id = uuidFromCharacterLink(link.getAttribute("href"));
                 if (id) collectedIds.add(id);
             }
@@ -510,7 +521,8 @@
         existenceCheckConcurrency: 2,
         existingCacheMaxEntries: 5000,
         maxLogLines: 400,
-        saveDebounceMs: 400
+        saveDebounceMs: 400,
+        liveQueueSettleMs: 500
     });
 
     const state = {
@@ -522,6 +534,7 @@
         results: [],
         pendingIds: [],
         currentIndex: 0,
+        activeIndex: null,
         startedAtMs: null
     };
 
@@ -1404,6 +1417,45 @@
         saveSettingsDebounced({ input: elements.input.value });
     }
 
+    // Assigning textarea.value does not emit an input event. Keep those
+    // programmatic queue changes (imports and completed work) visible to the
+    // other Datacat tabs just like a user edit.
+    function setInputValue(value, { mirror = false } = {}) {
+        const changed = value !== elements.input.value;
+        if (changed) {
+            elements.input.value = value;
+            updateCount();
+        }
+        if (mirror) {
+            clearTimeout(inputSyncTimer);
+            GM_setValue(datacatInputKey, value);
+        }
+        return changed;
+    }
+
+    function terminalQueueIds(results = state.results) {
+        return new Set(
+            results
+                .filter(
+                    (result) =>
+                        result.status === "retrieved" || result.status === "skipped"
+                )
+                .map((result) => result.id)
+        );
+    }
+
+    function remainingQueueIds(ids, results = state.results) {
+        const terminalIds = terminalQueueIds(results);
+        return ids.filter((id) => !terminalIds.has(id));
+    }
+
+    function excludeKnownExistingIds(ids) {
+        if (!elements.skipExisting.checked || elements.alwaysReextract.checked) {
+            return ids;
+        }
+        return ids.filter((id) => !existingIdCache.has(id));
+    }
+
     function importJanitorIds(rawIds) {
         if (state.running) {
             updateStatus("Datacat is busy; finish or stop the current queue before importing.");
@@ -1413,19 +1465,19 @@
         const imported = parseCharacterIds(
             rawIds.filter((id) => typeof id === "string").slice(0, 10000).join("\n")
         ).ids;
+        const newIds = excludeKnownExistingIds(imported);
         const existing = parseCharacterIds(elements.input.value).ids;
-        const ids = [...new Set([...existing, ...imported])];
-        elements.input.value = ids.join("\n");
-        updateCount();
+        const ids = [...new Set([...existing, ...newIds])];
+        setInputValue(ids.join("\n"), { mirror: true });
         elements.input.focus();
         updateStatus(
-            `Imported ${imported.length} Janitor ID${imported.length === 1 ? "" : "s"}; ${ids.length} ready to retrieve.`
+            `Imported ${newIds.length} Janitor ID${newIds.length === 1 ? "" : "s"}; ${ids.length} ready to retrieve.`
         );
-        return { count: imported.length, total: ids.length };
+        return { count: newIds.length, total: ids.length };
     }
 
     function syncJanitorIdsIntoInput() {
-        const imported = activeJanitorIds();
+        const imported = excludeKnownExistingIds(activeJanitorIds());
         if (!imported.length) return;
 
         if (state.running) {
@@ -1433,8 +1485,9 @@
             const added = imported.filter((id) => !have.has(id));
             if (!added.length) return;
             state.pendingIds.push(...added);
-            elements.input.value = state.pendingIds.join("\n");
-            updateCount();
+            setInputValue(remainingQueueIds(state.pendingIds).join("\n"), {
+                mirror: true
+            });
             updateProgress(state.results.length, state.pendingIds.length);
             persistJobProgress();
             state.enqueue?.();
@@ -1447,8 +1500,7 @@
         const existing = parseCharacterIds(elements.input.value).ids;
         const ids = [...new Set([...existing, ...imported])];
         if (ids.length === existing.length) return;
-        elements.input.value = ids.join("\n");
-        updateCount();
+        setInputValue(ids.join("\n"), { mirror: true });
         updateStatus(
             `Synced ${imported.length} ID${imported.length === 1 ? "" : "s"} from active Janitor tab${imported.length === 1 ? "" : "s"}.`
         );
@@ -1459,9 +1511,10 @@
         state.pendingIds = [...job.pendingIds];
         state.currentIndex = Number.isFinite(job.currentIndex) ? job.currentIndex : 0;
         state.results = Array.isArray(job.results) ? [...job.results] : [];
-        elements.input.value = state.pendingIds.join("\n");
+        setInputValue(
+            remainingQueueIds(state.pendingIds, state.results).join("\n")
+        );
         applyJobOptions(job.options);
-        updateCount();
         updateProgress(state.results.length, state.pendingIds.length);
         updateStats();
         if (state.currentIndex < state.pendingIds.length) {
@@ -1596,21 +1649,34 @@
         let nextExistenceCheckIndex = resumeFrom;
         let activeExistenceChecks = 0;
         let queueRefreshTimer = null;
-        const refreshQueueWithoutKnownExisting = () => {
+        const refreshQueueWithoutCompleted = () => {
             const { ids: queuedIds } = parseCharacterIds(elements.input.value);
+            const terminalIds = terminalQueueIds();
             const remainingIds = queuedIds.filter((id) => {
                 const status = existingStatuses.get(id);
-                return status !== true && status !== "deleted";
+                return (
+                    !terminalIds.has(id) &&
+                    status !== true &&
+                    status !== "deleted"
+                );
             });
             if (remainingIds.length === queuedIds.length) return;
-            elements.input.value = remainingIds.join("\n");
-            updateCount();
+            setInputValue(remainingIds.join("\n"), { mirror: true });
+        };
+        const updateQueueProgress = () => {
+            updateProgress(
+                Math.max(
+                    state.results.length,
+                    state.activeIndex === null ? 0 : state.activeIndex + 1
+                ),
+                ids.length
+            );
         };
         const scheduleQueueRefresh = () => {
             if (queueRefreshTimer !== null) return;
             queueRefreshTimer = setTimeout(() => {
                 queueRefreshTimer = null;
-                refreshQueueWithoutKnownExisting();
+                refreshQueueWithoutCompleted();
             }, 100);
         };
         const fillExistenceCheckQueue = () => {
@@ -1650,7 +1716,7 @@
                                 });
                                 completedIds.add(id);
                                 updateStats();
-                                updateProgress(state.results.length, ids.length);
+                                updateQueueProgress();
                                 persistJobProgress();
                             }
                             return { value };
@@ -1668,7 +1734,17 @@
         fillExistenceCheckQueue();
 
         try {
-            for (let index = resumeFrom; index < ids.length; index++) {
+            let index = resumeFrom;
+            while (true) {
+                // Keep the worker alive briefly after draining the queue. This
+                // closes the race where a Janitor send arrives at the exact
+                // moment the final item completes.
+                if (index >= ids.length) {
+                    const drainedLength = ids.length;
+                    await interruptibleSleep(CONFIG.liveQueueSettleMs);
+                    if (ids.length <= drainedLength) break;
+                    continue;
+                }
                 await waitWhilePaused();
                 if (!renewWorkerLease()) {
                     throw new Error("Retrieval worker lease was taken by another tab");
@@ -1681,11 +1757,13 @@
                 if (completedIds.has(id)) {
                     state.currentIndex = index + 1;
                     persistJobProgress();
+                    index++;
                     continue;
                 }
+                state.activeIndex = index;
                 startedIds.add(id);
 
-                updateProgress(state.results.length, ids.length);
+                updateQueueProgress();
                 const eta = formatEta(index - resumeFrom, ids.length - resumeFrom, state.startedAtMs);
                 updateStatus(
                     `[${index + 1}/${ids.length}] Processing ${id}…${eta}`
@@ -1710,9 +1788,11 @@
                                 "muted"
                             );
                             updateStats();
-                            updateProgress(state.results.length, ids.length);
+                            state.activeIndex = null;
+                            updateQueueProgress();
                             state.currentIndex = index + 1;
                             persistJobProgress();
+                            index++;
                             continue;
                         }
 
@@ -1728,9 +1808,11 @@
                             completedIds.add(id);
                             appendLog(`Skipped ${id}: already exists.`, "muted");
                             updateStats();
-                            updateProgress(state.results.length, ids.length);
+                            state.activeIndex = null;
+                            updateQueueProgress();
                             state.currentIndex = index + 1;
                             persistJobProgress();
+                            index++;
                             continue;
                         }
                     }
@@ -1748,6 +1830,7 @@
                     });
                     completedIds.add(id);
                     appendLog(`Retrieved ${id}.`, "success");
+                    scheduleQueueRefresh();
                 } catch (error) {
                     if (error.message === "Stopped by user") throw error;
 
@@ -1764,7 +1847,8 @@
                         appendLog(`Auth failure on ${id}: ${String(error)}`, "error");
                         state.currentIndex = index + 1;
                         updateStats();
-                        updateProgress(state.results.length, ids.length);
+                        state.activeIndex = null;
+                        updateQueueProgress();
                         throw error;
                     }
 
@@ -1780,7 +1864,8 @@
                 }
 
                 updateStats();
-                updateProgress(state.results.length, ids.length);
+                state.activeIndex = null;
+                updateQueueProgress();
                 state.currentIndex = index + 1;
                 persistJobProgress();
 
@@ -1790,6 +1875,7 @@
                     );
                     await interruptibleSleep(options.delayMs);
                 }
+                index++;
             }
 
             const counts = countByStatus();
@@ -1823,8 +1909,9 @@
             for (const controller of state.requestControllers) controller.abort();
             state.requestControllers.clear();
             clearTimeout(queueRefreshTimer);
-            refreshQueueWithoutKnownExisting();
+            refreshQueueWithoutCompleted();
             state.sleepCancel = null;
+            state.activeIndex = null;
             state.startedAtMs = null;
             state.enqueue = null;
             releaseWorkerLease();
@@ -1932,6 +2019,31 @@
         }
     }
 
+    function clampPanelToViewport(panel) {
+        const rect = panel.getBoundingClientRect();
+        const left = Math.min(
+            Math.max(0, pageWindow.innerWidth - rect.width),
+            Math.max(0, rect.left)
+        );
+        const top = Math.min(
+            Math.max(0, pageWindow.innerHeight - rect.height),
+            Math.max(0, rect.top)
+        );
+
+        if (
+            Math.round(rect.left) === Math.round(left) &&
+            Math.round(rect.top) === Math.round(top)
+        ) {
+            return null;
+        }
+
+        panel.style.right = "auto";
+        panel.style.bottom = "auto";
+        panel.style.left = `${Math.round(left)}px`;
+        panel.style.top = `${Math.round(top)}px`;
+        return { left: Math.round(left), top: Math.round(top) };
+    }
+
     function enableDragging(panel, header, onDrop) {
         let drag = null;
 
@@ -1995,8 +2107,7 @@
     GM_addValueChangeListener(datacatInputKey, (_key, _old, value, remote) => {
         if (!remote || state.running) return;
         if (typeof value !== "string" || value === elements.input.value) return;
-        elements.input.value = value;
-        updateCount();
+        setInputValue(value);
     });
 
     for (const element of [
@@ -2039,24 +2150,22 @@
 
     elements.clear.addEventListener("click", () => {
         if (state.running) return;
-        elements.input.value = "";
         state.results = [];
         state.pendingIds = [];
         state.currentIndex = 0;
+        setInputValue("", { mirror: true });
         elements.log.textContent = "";
         elements.log.style.display = "none";
         saveJob(null);
         updateStatus("Ready.");
         updateProgress(0, 0);
-        updateCount();
         updateStats();
     });
 
     elements.retryFailed.addEventListener("click", () => {
         const failed = getFailedIds();
         if (!state.running && failed.length) {
-            elements.input.value = failed.join("\n");
-            updateCount();
+            setInputValue(failed.join("\n"), { mirror: true });
             processIds(failed);
         }
     });
@@ -2073,9 +2182,8 @@
             updateResultActions();
             return;
         }
-        elements.input.value = job.pendingIds.join("\n");
+        setInputValue(job.pendingIds.join("\n"));
         applyJobOptions(job.options);
-        updateCount();
         processIds(job.pendingIds, {
             resumeFrom: job.currentIndex,
             priorResults: Array.isArray(job.results) ? job.results : []
@@ -2125,6 +2233,8 @@
     });
 
     applySavedSettings();
+    const initialPanelPosition = clampPanelToViewport(panel);
+    if (initialPanelPosition) saveSettings(initialPanelPosition);
     importJanitorIdsFromHash();
     syncJanitorIdsIntoInput();
 
@@ -2148,5 +2258,9 @@
             left: Math.round(rect.left),
             top: Math.round(rect.top)
         });
+    });
+    pageWindow.addEventListener("resize", () => {
+        const position = clampPanelToViewport(panel);
+        if (position) saveSettings(position);
     });
 })();

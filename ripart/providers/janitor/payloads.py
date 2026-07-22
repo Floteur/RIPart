@@ -265,9 +265,7 @@ def build_trigger_search_messages(entries: list[str]) -> list[tuple[str, str]]:
         # Proper names and distinctive words cover entries without a useful
         # heading.  Keep this deliberately short: a broad sweep wastes probes
         # on generic vocabulary before other recovered entries are tested.
-        for phrase in re.findall(
-            r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*)+\b", text
-        ):
+        for phrase in re.findall(r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*)+\b", text):
             candidates.append(phrase)
         words: list[str] = []
         for word in re.findall(r"[A-Za-z][A-Za-z'-]{3,}", text):
@@ -483,7 +481,9 @@ def build_character(
     return {
         "name": extract_char_name(payload or {}) or meta.get("name") or "",
         "avatarBase64": avatar_base64 or "",
-        "description": normalize_user_placeholder((meta.get("personality") or "").strip())
+        "description": normalize_user_placeholder(
+            (meta.get("personality") or "").strip()
+        )
         if public
         else normalize_user_placeholder(extract_card(payload or {}) or card or ""),
         "personality": "",

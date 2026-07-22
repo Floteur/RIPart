@@ -111,7 +111,8 @@ def test_recovered_lore_with_verified_trigger_is_enabled():
 
 def test_recovered_lore_present_in_probe_is_exported_as_constant():
     book = build_character_book(
-        ["Private recovered content."], recovered_constants={"private recovered content."}
+        ["Private recovered content."],
+        recovered_constants={"private recovered content."},
     )
 
     assert book is not None
@@ -145,7 +146,12 @@ def test_v3_card_round_trip_preserves_prompt_and_v3_fields():
             "creator_notes_multilingual": {"fr": "Remarques"},
             "source": ["urn:source:original"],
             "assets": [
-                {"type": "icon", "uri": "https://example.test/icon.webp", "name": "main", "ext": "webp"}
+                {
+                    "type": "icon",
+                    "uri": "https://example.test/icon.webp",
+                    "name": "main",
+                    "ext": "webp",
+                }
             ],
             "creation_date": 123,
             "modification_date": 456,

@@ -22,7 +22,9 @@ def test_credential_store_creates_parent_directory(tmp_path):
     assert current.read_text(encoding="utf-8") == "rotated"
 
 
-def test_listed_card_saver_skips_existing_and_continues_after_errors(monkeypatch, tmp_path):
+def test_listed_card_saver_skips_existing_and_continues_after_errors(
+    monkeypatch, tmp_path
+):
     messages: list[str] = []
     ui = ExtractionUI(
         library_dir=tmp_path,
@@ -38,7 +40,10 @@ def test_listed_card_saver_skips_existing_and_continues_after_errors(monkeypatch
     saved: list[str] = []
     monkeypatch.setattr(
         "ripart.cli_extractors.save_to_library",
-        lambda _directory, identifier, _result: (saved.append(identifier), {"png": str(tmp_path / f"{identifier}.png")})[1],
+        lambda _directory, identifier, _result: (
+            saved.append(identifier),
+            {"png": str(tmp_path / f"{identifier}.png")},
+        )[1],
     )
 
     def extract(item):
@@ -56,4 +61,7 @@ def test_listed_card_saver_skips_existing_and_continues_after_errors(monkeypatch
 
     assert saved == ["new"]
     assert any("broken: unavailable" in message for message in messages)
-    assert any("saved [bold]1[/] card(s); skipped [bold]1[/]" in message for message in messages)
+    assert any(
+        "saved [bold]1[/] card(s); skipped [bold]1[/]" in message
+        for message in messages
+    )

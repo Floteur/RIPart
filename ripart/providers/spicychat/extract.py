@@ -161,7 +161,11 @@ def extract_character(
                 "(definition_visible=false); only public metadata (name, greeting, "
                 "tags, avatar) was recovered. The persona/example dialogue are not "
                 "exposed by the API and stay empty."
-                + ("" if leak else " Re-run with --leak to recover it via a model dump.")
+                + (
+                    ""
+                    if leak
+                    else " Re-run with --leak to recover it via a model dump."
+                )
             )
             log("definition gated — saving a partial card")
 

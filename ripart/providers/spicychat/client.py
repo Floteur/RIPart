@@ -175,7 +175,9 @@ def _mint(refresh_token: str) -> dict[str, str]:
             content=body,
         )
     except httpx.HTTPError as exc:
-        raise SpicyChatError(f"network error talking to spicychat.ai auth: {exc}") from exc
+        raise SpicyChatError(
+            f"network error talking to spicychat.ai auth: {exc}"
+        ) from exc
     if response.status_code != 200:
         raise SpicyChatError(
             "refresh token rejected - run `rip spicychat login` again "

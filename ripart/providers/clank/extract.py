@@ -54,10 +54,16 @@ def _build_result(
 
     # Greetings: prefer the verbatim echo greeting for first_mes; take any extra
     # scene greetings as alternates.
-    greetings = [g for g in (scene.get("initial_message") or story.get("initial_message") or []) if str(g).strip()]
+    greetings = [
+        g
+        for g in (scene.get("initial_message") or story.get("initial_message") or [])
+        if str(g).strip()
+    ]
     if not greeting:
         greeting = greetings[0] if greetings else ""
-    alternates = [g for g in greetings if str(g).strip() and _norm_ws(g) != _norm_ws(greeting)]
+    alternates = [
+        g for g in greetings if str(g).strip() and _norm_ws(g) != _norm_ws(greeting)
+    ]
 
     # Scenario: the scene's public setup prompt.
     scenario = str(scene.get("prompt") or story.get("description") or "").strip()
@@ -65,7 +71,9 @@ def _build_result(
     # Tags from the scene.
     tags = scene.get("tags") if isinstance(scene.get("tags"), list) else []
 
-    creator = agent.get("created_by") if isinstance(agent.get("created_by"), dict) else {}
+    creator = (
+        agent.get("created_by") if isinstance(agent.get("created_by"), dict) else {}
+    )
     avatar = fetch_avatar(agent.get("image") or story.get("image"))
 
     notes_parts: list[str] = []
@@ -74,7 +82,9 @@ def _build_result(
         definition = parsed["definition"]
         example = parsed["example"]
         if keep_boilerplate and parsed.get("boilerplate"):
-            notes_parts.append(f"--- clank system boilerplate ---\n{parsed['boilerplate']}")
+            notes_parts.append(
+                f"--- clank system boilerplate ---\n{parsed['boilerplate']}"
+            )
         source = "clank-echo-leak"
     else:
         definition = ""
@@ -107,14 +117,18 @@ def _build_result(
 
     meta = {
         "name": name,
-        "creator_name": str(creator.get("display_name") or creator.get("username") or "").strip(),
+        "creator_name": str(
+            creator.get("display_name") or creator.get("username") or ""
+        ).strip(),
         "creator_id": str(creator.get("user_id") or ""),
         "is_nsfw": bool(scene.get("is_nsfw")),
         "showdefinition": bool(parsed),
     }
 
     return {
-        "url": url if url.startswith(("http://", "https://")) else f"{CLANK_BASE}/chat/{chat_id}",
+        "url": url
+        if url.startswith(("http://", "https://"))
+        else f"{CLANK_BASE}/chat/{chat_id}",
         "characterId": str(agent.get("id") or chat_id),
         "characterName": name,
         "character": character,
@@ -185,7 +199,11 @@ def extract_chat(
 
     info = get_chat_info(chat_id)
     # Richer scene data (scenario prompt, tags, greetings) when we have a scene id.
-    scene_id = ((info.get("story_data") or {}).get("id")) if isinstance(info.get("story_data"), dict) else None
+    scene_id = (
+        ((info.get("story_data") or {}).get("id"))
+        if isinstance(info.get("story_data"), dict)
+        else None
+    )
     scene = get_story(str(scene_id)) if scene_id else {}
     messages = get_chat_messages(chat_id)
     body = find_echo_body(messages)
@@ -248,7 +266,9 @@ def extract_chat(
             if entries:
                 note = "--- Recovered lorebook entries ---\n" + "\n\n".join(entries)
                 character = result.get("character") or {}
-                character["creatorNotes"] = (character.get("creatorNotes", "") + "\n\n" + note).strip()
+                character["creatorNotes"] = (
+                    character.get("creatorNotes", "") + "\n\n" + note
+                ).strip()
         except ClankError as exc:
             result["diagnostics"]["lorebookError"] = str(exc)
 
@@ -290,7 +310,9 @@ def extract_story(
     tags = [str(t) for t in (story.get("tags") or [])]
     avatar = fetch_avatar(primary.get("image_url") or story.get("image_url"))
 
-    creator = primary.get("created_by") if isinstance(primary.get("created_by"), dict) else {}
+    creator = (
+        primary.get("created_by") if isinstance(primary.get("created_by"), dict) else {}
+    )
     if not creator:
         creator = {
             "user_id": story.get("created_by_user_id"),
@@ -326,13 +348,17 @@ def extract_story(
     character_id = str(primary.get("id") or scene_id)
     username = str(primary.get("username") or "").strip()
     return {
-        "url": f"{CLANK_BASE}/@{username}" if username else f"{CLANK_BASE}/?scene={scene_id}",
+        "url": f"{CLANK_BASE}/@{username}"
+        if username
+        else f"{CLANK_BASE}/?scene={scene_id}",
         "characterId": character_id,
         "characterName": name,
         "character": character,
         "meta": {
             "name": name,
-            "creator_name": str(creator.get("display_name") or creator.get("username") or "").strip(),
+            "creator_name": str(
+                creator.get("display_name") or creator.get("username") or ""
+            ).strip(),
             "creator_id": str(creator.get("user_id") or ""),
             "is_nsfw": bool(story.get("is_nsfw")),
             "showdefinition": False,

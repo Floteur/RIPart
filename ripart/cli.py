@@ -60,10 +60,18 @@ click.rich_click.TEXT_MARKUP = "rich"
 click.rich_click.SHOW_ARGUMENTS = True
 click.rich_click.GROUP_ARGUMENTS_OPTIONS = False
 click.rich_click.OPTIONS_TABLE_COLUMN_TYPES = [
-    "required", "opt_short", "opt_long", "metavar", "help"
+    "required",
+    "opt_short",
+    "opt_long",
+    "metavar",
+    "help",
 ]
 click.rich_click.OPTIONS_TABLE_HELP_SECTIONS = [
-    "help", "deprecated", "envvar", "default", "required"
+    "help",
+    "deprecated",
+    "envvar",
+    "default",
+    "required",
 ]
 click.rich_click.STYLE_OPTION = "bold cyan"
 click.rich_click.STYLE_ARGUMENT = "bold cyan"
@@ -988,13 +996,28 @@ def janitor() -> None:
 
 
 # Register each JanitorAI command once under its provider group.
-for _janitor_command in (status, login, import_session, lorebook, inspect, extract, recent):
+for _janitor_command in (
+    status,
+    login,
+    import_session,
+    lorebook,
+    inspect,
+    extract,
+    recent,
+):
     janitor.add_command(_janitor_command)
 janitor.add_command(recent, "list")
 
 # ``extract`` remains at the root as the supported cross-provider URL router.
 # All other JanitorAI commands must be invoked through ``rip janitor``.
-for _janitor_root_command in ("status", "login", "import-session", "lorebook", "inspect", "recent"):
+for _janitor_root_command in (
+    "status",
+    "login",
+    "import-session",
+    "lorebook",
+    "inspect",
+    "recent",
+):
     main.commands.pop(_janitor_root_command, None)
 
 
@@ -1011,7 +1034,9 @@ def status_overview() -> None:
     # JanitorAI: a real login check needs the browser, so this only reports a
     # saved session. ponytail: cheap file probe; `rip janitor status` verifies.
     if state_path("janitor-session.json").exists():
-        _ok("janitor    session saved [dim](verify with [bold]rip janitor status[/])[/]")
+        _ok(
+            "janitor    session saved [dim](verify with [bold]rip janitor status[/])[/]"
+        )
     else:
         _no("janitor    no session [dim](run [bold]rip janitor login[/])[/]")
 
@@ -1021,7 +1046,9 @@ def status_overview() -> None:
         if remaining is not None and remaining <= 0:
             _no("saucepan   token expired [dim](run [bold]rip saucepan login[/])[/]")
         elif remaining is not None:
-            _ok(f"saucepan   token configured [dim](expires in {_fmt_expiry(remaining)})[/]")
+            _ok(
+                f"saucepan   token configured [dim](expires in {_fmt_expiry(remaining)})[/]"
+            )
         else:
             _ok("saucepan   token configured")
     else:
@@ -1029,7 +1056,10 @@ def status_overview() -> None:
 
     if ck.has_session():
         has_csrf = bool(ck.load_session().get("csrf_token"))
-        _ok("clank      session configured" + ("" if has_csrf else " [dim](no csrf token)[/]"))
+        _ok(
+            "clank      session configured"
+            + ("" if has_csrf else " [dim](no csrf token)[/]")
+        )
     else:
         _no("clank      no session [dim](run [bold]rip clank login[/])[/]")
 
@@ -1038,9 +1068,13 @@ def status_overview() -> None:
         if remaining <= 0:
             _no("spicychat  token expired [dim](run [bold]rip spicychat login[/])[/]")
         else:
-            _ok(f"spicychat  session configured [dim](expires in {_fmt_expiry(remaining)})[/]")
+            _ok(
+                f"spicychat  session configured [dim](expires in {_fmt_expiry(remaining)})[/]"
+            )
     else:
-        _no("spicychat  guest only [dim](run [bold]rip spicychat login[/] for gated cards)[/]")
+        _no(
+            "spicychat  guest only [dim](run [bold]rip spicychat login[/] for gated cards)[/]"
+        )
 
     library = OUT / "library"
     cards = len(list(library.glob("*.png"))) if library.is_dir() else 0
@@ -1123,9 +1157,15 @@ def saucepan_logout() -> None:
     help="Max companions to display.",
 )
 @click.option(
-    "--offset", type=click.IntRange(min=0), default=0, show_default=True, help="Results to skip."
+    "--offset",
+    type=click.IntRange(min=0),
+    default=0,
+    show_default=True,
+    help="Results to skip.",
 )
-@click.option("--tag", "tags", multiple=True, metavar="TAG", help="Require a tag (repeatable).")
+@click.option(
+    "--tag", "tags", multiple=True, metavar="TAG", help="Require a tag (repeatable)."
+)
 @click.option(
     "--exclude-tag",
     "excluded_tags",
@@ -1133,7 +1173,9 @@ def saucepan_logout() -> None:
     metavar="TAG",
     help="Exclude a tag (repeatable).",
 )
-@click.option("--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW companions.")
+@click.option(
+    "--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW companions."
+)
 @click.option(
     "--extract",
     "do_extract",
@@ -1181,7 +1223,9 @@ def saucepan_list(
         companion_id = str(companion.get("id") or companion.get("companion_id") or "")
         name = str(companion.get("display_name") or companion.get("name") or "?")
         tags = companion.get("tags") if isinstance(companion.get("tags"), list) else []
-        nsfw_mark = " [red]nsfw[/]" if companion.get("is_nsfw") or companion.get("sus") else ""
+        nsfw_mark = (
+            " [red]nsfw[/]" if companion.get("is_nsfw") or companion.get("sus") else ""
+        )
         table.add_row(
             str(index),
             name[:34] + nsfw_mark,
@@ -1198,10 +1242,15 @@ def saucepan_list(
 
     if do_extract:
         cli_extractors.save_listed_cards(
-            _extraction_ui(), companions,
+            _extraction_ui(),
+            companions,
             item_id=lambda item: str(item.get("id") or item.get("companion_id") or ""),
-            item_name=lambda item: str(item.get("display_name") or item.get("name") or "?"),
-            extract=lambda item: sp.extract_companion(str(item.get("id") or item.get("companion_id") or "")),
+            item_name=lambda item: str(
+                item.get("display_name") or item.get("name") or "?"
+            ),
+            extract=lambda item: sp.extract_companion(
+                str(item.get("id") or item.get("companion_id") or "")
+            ),
         )
 
 
@@ -1277,7 +1326,7 @@ def saucepan_providers() -> None:
     metavar="TEXT",
     default=None,
     help="[--leak, BYOK only] Temporarily set the provider config's system prompt "
-    "(\"Provider Pre Content Prompt\") for the leak, then restore it. Helps a capable "
+    '("Provider Pre Content Prompt") for the leak, then restore it. Helps a capable '
     "model dump verbatim; needs --leak-config (not --leak-model).",
 )
 @click.option(
@@ -1322,8 +1371,6 @@ def saucepan_extract(
         leak_echo=leak_echo,
         verbose=verbose,
     )
-
-
 
 
 # --------------------------------------------------------------------------- #
@@ -1383,7 +1430,11 @@ def clank_status() -> None:
     has_csrf = bool(ck.load_session().get("csrf_token"))
     _ok(
         "clank.world session configured"
-        + ("" if has_csrf else " [dim](no csrf token; --leak auto-generation unavailable)[/]")
+        + (
+            ""
+            if has_csrf
+            else " [dim](no csrf token; --leak auto-generation unavailable)[/]"
+        )
     )
     sys.exit(0)
 
@@ -1403,7 +1454,9 @@ def clank_logout() -> None:
     show_default=True,
     help="'new' = newest-first; 'trending' = clank's ranked feed.",
 )
-@click.option("--limit", type=int, default=30, show_default=True, help="Max stories to list.")
+@click.option(
+    "--limit", type=int, default=30, show_default=True, help="Max stories to list."
+)
 @click.option(
     "--tag",
     "tags",
@@ -1411,8 +1464,16 @@ def clank_logout() -> None:
     metavar="TAG",
     help="Filter by tag (repeatable). Tags are case-sensitive (e.g. Female, Husband).",
 )
-@click.option("--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW stories.")
-@click.option("--page-size", type=int, default=20, show_default=True, help="Items fetched per API page.")
+@click.option(
+    "--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW stories."
+)
+@click.option(
+    "--page-size",
+    type=int,
+    default=20,
+    show_default=True,
+    help="Items fetched per API page.",
+)
 @click.option(
     "--extract",
     "do_extract",
@@ -1423,7 +1484,12 @@ def clank_logout() -> None:
     "Marked clank-partial.",
 )
 def clank_list(
-    sort: str, limit: int, tags: tuple[str, ...], nsfw: bool, page_size: int, do_extract: bool
+    sort: str,
+    limit: int,
+    tags: tuple[str, ...],
+    nsfw: bool,
+    page_size: int,
+    do_extract: bool,
 ) -> None:
     """List clank.world stories/characters (newest-first by default).
 
@@ -1476,7 +1542,8 @@ def clank_list(
 
     if do_extract:
         cli_extractors.save_listed_cards(
-            _extraction_ui(), items,
+            _extraction_ui(),
+            items,
             item_id=lambda item: str(item.get("agent_id") or item.get("id") or ""),
             item_name=lambda item: str(item.get("agent_name") or "?"),
             extract=ck.extract_story,
@@ -1551,8 +1618,6 @@ def clank_extract(
     )
 
 
-
-
 # --------------------------------------------------------------------------- #
 # spicychat
 # --------------------------------------------------------------------------- #
@@ -1607,7 +1672,9 @@ def spicychat_login(refresh_token: str) -> None:
 def spicychat_status() -> None:
     """Report whether a spicychat.ai login is configured (guest works regardless)."""
     if not sc.has_token():
-        _no("no spicychat.ai login [dim](guest extraction of public definitions still works)[/]")
+        _no(
+            "no spicychat.ai login [dim](guest extraction of public definitions still works)[/]"
+        )
         sys.exit(1)
     try:
         sc.authenticate()
@@ -1643,7 +1710,10 @@ def _catalogue_options(func):
     )(func)
     func = _tag_option(func)
     func = click.option(
-        "--nsfw/--no-nsfw", default=True, show_default=True, help="Include NSFW characters."
+        "--nsfw/--no-nsfw",
+        default=True,
+        show_default=True,
+        help="Include NSFW characters.",
     )(func)
     func = click.option(
         "--extract",
@@ -1674,7 +1744,9 @@ def spicychat_search(
     also ripped into the library. Use [bold]rip spicychat list[/] to browse
     without a query.
     """
-    _spicychat_list(query, limit=limit, tags=tags, nsfw=nsfw, do_extract=do_extract, verbose=verbose)
+    _spicychat_list(
+        query, limit=limit, tags=tags, nsfw=nsfw, do_extract=do_extract, verbose=verbose
+    )
 
 
 @spicychat.command("list")
@@ -1692,7 +1764,9 @@ def spicychat_list(
     ranked by recent activity. Narrow it with [bold]--tag[/] / [bold]--no-nsfw[/],
     and rip each listed character with [bold]--extract[/].
     """
-    _spicychat_list("", limit=limit, tags=tags, nsfw=nsfw, do_extract=do_extract, verbose=verbose)
+    _spicychat_list(
+        "", limit=limit, tags=tags, nsfw=nsfw, do_extract=do_extract, verbose=verbose
+    )
 
 
 def _spicychat_list(
@@ -1731,7 +1805,9 @@ def _spicychat_list(
     for i, doc in enumerate(hits, 1):
         tag_list = doc.get("tags") if isinstance(doc.get("tags"), list) else []
         nsfw_mark = " [red]nsfw[/]" if doc.get("is_nsfw") else ""
-        public = "[green]public[/]" if doc.get("definition_visible") else "[yellow]gated[/]"
+        public = (
+            "[green]public[/]" if doc.get("definition_visible") else "[yellow]gated[/]"
+        )
         table.add_row(
             str(i),
             (str(doc.get("name") or "?")[:34]) + nsfw_mark,
@@ -1745,10 +1821,13 @@ def _spicychat_list(
 
     if do_extract:
         cli_extractors.save_listed_cards(
-            _extraction_ui(), hits,
+            _extraction_ui(),
+            hits,
             item_id=lambda item: str(item.get("character_id") or ""),
             item_name=lambda item: str(item.get("name") or "?"),
-            extract=lambda item: sc.extract_character(str(item.get("character_id") or "")),
+            extract=lambda item: sc.extract_character(
+                str(item.get("character_id") or "")
+            ),
         )
 
 
@@ -1822,8 +1901,6 @@ def spicychat_extract(
         leak_keep=leak_keep,
         verbose=verbose,
     )
-
-
 
 
 # Provider extraction implementation and result formatting live in

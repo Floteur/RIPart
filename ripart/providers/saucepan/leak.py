@@ -97,7 +97,9 @@ def get_provider_config(config_id: str) -> dict[str, Any] | None:
     return None
 
 
-def find_echo_config(echo_base_url: str = DEFAULT_ECHO_BASE_URL) -> dict[str, Any] | None:
+def find_echo_config(
+    echo_base_url: str = DEFAULT_ECHO_BASE_URL,
+) -> dict[str, Any] | None:
     """Find a pre-configured ``custom`` provider whose ``provider_url`` is an echo proxy.
 
     Saucepan only persists a custom ``provider_url`` on a genuine ``custom``
@@ -145,7 +147,9 @@ def update_provider_config(config_id: str, **fields: Any) -> dict[str, Any]:
         "temperature": cfg.get("temperature", 1.0),
         "context_length": cfg.get("context_length") or 32000,
         "provider_url": cfg.get("provider_url"),
-        "use_chat_temperature_override": cfg.get("use_chat_temperature_override", False),
+        "use_chat_temperature_override": cfg.get(
+            "use_chat_temperature_override", False
+        ),
         "provider_post_history_prompt": cfg.get("provider_post_history_prompt"),
         "provider_prompt": cfg.get("provider_prompt"),
     }
@@ -235,7 +239,9 @@ def _run_generation(
             message or f"generation request failed (HTTP {status})", status
         )
     generation_id = data["generation_id"]
-    log(f"generation {generation_id} queued (~{data.get('estimated_wait_seconds', '?')}s)")
+    log(
+        f"generation {generation_id} queued (~{data.get('estimated_wait_seconds', '?')}s)"
+    )
 
     deadline = time.monotonic() + timeout
     polls = 0
@@ -345,7 +351,9 @@ def leak_definition(
                 continue
             if not accept_any and not _looks_like_definition(text):
                 # Often the model just keeps roleplaying instead of dumping.
-                log("-> doesn't look like a definition dump (model may have stayed in character); retrying")
+                log(
+                    "-> doesn't look like a definition dump (model may have stayed in character); retrying"
+                )
                 last_error = SaucepanError(
                     "model replied in-character instead of dumping the definition "
                     "(try --leak-mode user, a different --leak-config model, or --leak-keep to accept anyway)"
@@ -421,8 +429,12 @@ def _run_echo_generation(
         },
     )
     if not ok or not isinstance(data, dict) or not data.get("generation_id"):
-        message = (data.get("error") or {}).get("message") if isinstance(data, dict) else None
-        raise SaucepanError(message or f"generation request failed (HTTP {status})", status)
+        message = (
+            (data.get("error") or {}).get("message") if isinstance(data, dict) else None
+        )
+        raise SaucepanError(
+            message or f"generation request failed (HTTP {status})", status
+        )
     generation_id = data["generation_id"]
     log(f"echo generation {generation_id} queued")
 
@@ -511,9 +523,13 @@ def leak_definition_via_echo(
         restore_model = original.get("model_id")
         hijack = True
         log(f"pointing provider config at echo proxy ({echo_base_url}) …")
-        update_provider_config(config_id, provider_url=echo_base_url, model_id=ECHO_MODEL)
+        update_provider_config(
+            config_id, provider_url=echo_base_url, model_id=ECHO_MODEL
+        )
         refreshed = get_provider_config(config_id) or {}
-        if (refreshed.get("provider_url") or "").rstrip("/") != echo_base_url.rstrip("/"):
+        if (refreshed.get("provider_url") or "").rstrip("/") != echo_base_url.rstrip(
+            "/"
+        ):
             update_provider_config(
                 config_id, provider_url=restore_url, model_id=restore_model
             )
@@ -539,7 +555,9 @@ def leak_definition_via_echo(
         if not definition:
             raise SaucepanError("echo body had no system/developer message to leak")
         raw = json.dumps(body, ensure_ascii=False)
-        log(f"echo leak: {len(definition)} chars of definition, {len(greeting_list)} greeting(s)")
+        log(
+            f"echo leak: {len(definition)} chars of definition, {len(greeting_list)} greeting(s)"
+        )
         return {
             "definition": definition,
             "greetings": greeting_list,
@@ -554,7 +572,9 @@ def leak_definition_via_echo(
                 )
                 log("restored original provider_url")
             except SaucepanError:
-                log("! could not restore provider_url — check the config in Saucepan settings")
+                log(
+                    "! could not restore provider_url — check the config in Saucepan settings"
+                )
         if chat_id:
             archive_chat(chat_id)
 

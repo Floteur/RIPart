@@ -95,7 +95,7 @@ def is_card_url(url: str) -> bool:
 def card_id_from_url(url: str) -> str:
     """A filesystem-safe id derived from the card URL's final path segment."""
     path = urlparse(url if "//" in (url or "") else f"//{url}").path
-    stem = (path.rstrip("/").rsplit("/", 1)[-1] or "card")
+    stem = path.rstrip("/").rsplit("/", 1)[-1] or "card"
     for ext in _CARD_EXTS:
         if stem.lower().endswith(ext):
             stem = stem[: -len(ext)]
@@ -124,7 +124,9 @@ def download(url: str) -> tuple[bytes, str]:
     if response.status_code == 404:
         raise TavernCardError(f"card not found (404): {url}", 404)
     if response.is_error:
-        raise TavernCardError(f"card host returned {response.status_code}: {url}", response.status_code)
+        raise TavernCardError(
+            f"card host returned {response.status_code}: {url}", response.status_code
+        )
     content = response.content
     if not content:
         raise TavernCardError(f"card host returned an empty body: {url}")

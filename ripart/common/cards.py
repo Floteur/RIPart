@@ -46,63 +46,73 @@ def build_world_info(raw_entries: list[dict[str, Any]]) -> dict[str, Any]:
         # below make the entry usable by the rest of RIPart without replacing
         # explicitly authored values with our defaults.
         entry = copy.deepcopy(raw)
-        entry.update({
-            "uid": uid,
-            "key": key if isinstance(key, list) else [],
-            "keysecondary": secondary if isinstance(secondary, list) else [],
-            "comment": str(
-                raw.get("comment")
-                or raw.get("title")
-                or raw.get("name")
-                or f"Entry {uid}"
-            ).strip(),
-            "content": content,
-            "constant": raw.get("constant") is True,
-            "selective": raw.get("selective")
-            if isinstance(raw.get("selective"), bool)
-            else bool(secondary),
-            "order": order if isinstance(order, (int, float)) else 100,
-            "position": raw.get("position", 0),
-            "disable": raw.get("disable") is True or raw.get("enabled") is False,
-            "displayIndex": raw.get("displayIndex", uid),
-            "addMemo": raw.get("addMemo", True),
-            "group": raw.get("group", ""),
-            "groupOverride": raw.get("groupOverride", False),
-            "groupWeight": raw.get("groupWeight")
-            if isinstance(raw.get("groupWeight"), int)
-            else 100,
-            "sticky": raw.get("sticky", 0),
-            "cooldown": raw.get("cooldown", 0),
-            "delay": raw.get("delay", 0),
-            "probability": raw.get("probability", 100),
-            "depth": raw.get("depth", 4),
-            "useProbability": raw.get("useProbability", True),
-            "role": raw.get("role"),
-            "vectorized": raw.get("vectorized", False),
-            "excludeRecursion": raw.get("excludeRecursion", False),
-            "preventRecursion": raw.get("preventRecursion", False),
-            "delayUntilRecursion": raw.get("delayUntilRecursion", False),
-            "scanDepth": raw.get("scanDepth"),
-            "caseSensitive": raw.get("caseSensitive", raw.get("case_sensitive")),
-            "matchWholeWords": raw.get("matchWholeWords"),
-            "useGroupScoring": raw.get("useGroupScoring"),
-            "automationId": raw.get("automationId", ""),
-            "selectiveLogic": raw.get("selectiveLogic")
-            if isinstance(raw.get("selectiveLogic"), int)
-            else 0,
-            "ignoreBudget": raw.get("ignoreBudget", False),
-            "matchPersonaDescription": raw.get("matchPersonaDescription", False),
-            "matchCharacterDescription": raw.get("matchCharacterDescription", False),
-            "matchCharacterPersonality": raw.get("matchCharacterPersonality", False),
-            "matchCharacterDepthPrompt": raw.get("matchCharacterDepthPrompt", False),
-            "matchScenario": raw.get("matchScenario", False),
-            "matchCreatorNotes": raw.get("matchCreatorNotes", False),
-            "outletName": raw.get("outletName", ""),
-            "triggers": copy.deepcopy(raw.get("triggers", [])),
-            "characterFilter": copy.deepcopy(
-                raw.get("characterFilter", {"isExclude": False, "names": [], "tags": []})
-            ),
-        })
+        entry.update(
+            {
+                "uid": uid,
+                "key": key if isinstance(key, list) else [],
+                "keysecondary": secondary if isinstance(secondary, list) else [],
+                "comment": str(
+                    raw.get("comment")
+                    or raw.get("title")
+                    or raw.get("name")
+                    or f"Entry {uid}"
+                ).strip(),
+                "content": content,
+                "constant": raw.get("constant") is True,
+                "selective": raw.get("selective")
+                if isinstance(raw.get("selective"), bool)
+                else bool(secondary),
+                "order": order if isinstance(order, (int, float)) else 100,
+                "position": raw.get("position", 0),
+                "disable": raw.get("disable") is True or raw.get("enabled") is False,
+                "displayIndex": raw.get("displayIndex", uid),
+                "addMemo": raw.get("addMemo", True),
+                "group": raw.get("group", ""),
+                "groupOverride": raw.get("groupOverride", False),
+                "groupWeight": raw.get("groupWeight")
+                if isinstance(raw.get("groupWeight"), int)
+                else 100,
+                "sticky": raw.get("sticky", 0),
+                "cooldown": raw.get("cooldown", 0),
+                "delay": raw.get("delay", 0),
+                "probability": raw.get("probability", 100),
+                "depth": raw.get("depth", 4),
+                "useProbability": raw.get("useProbability", True),
+                "role": raw.get("role"),
+                "vectorized": raw.get("vectorized", False),
+                "excludeRecursion": raw.get("excludeRecursion", False),
+                "preventRecursion": raw.get("preventRecursion", False),
+                "delayUntilRecursion": raw.get("delayUntilRecursion", False),
+                "scanDepth": raw.get("scanDepth"),
+                "caseSensitive": raw.get("caseSensitive", raw.get("case_sensitive")),
+                "matchWholeWords": raw.get("matchWholeWords"),
+                "useGroupScoring": raw.get("useGroupScoring"),
+                "automationId": raw.get("automationId", ""),
+                "selectiveLogic": raw.get("selectiveLogic")
+                if isinstance(raw.get("selectiveLogic"), int)
+                else 0,
+                "ignoreBudget": raw.get("ignoreBudget", False),
+                "matchPersonaDescription": raw.get("matchPersonaDescription", False),
+                "matchCharacterDescription": raw.get(
+                    "matchCharacterDescription", False
+                ),
+                "matchCharacterPersonality": raw.get(
+                    "matchCharacterPersonality", False
+                ),
+                "matchCharacterDepthPrompt": raw.get(
+                    "matchCharacterDepthPrompt", False
+                ),
+                "matchScenario": raw.get("matchScenario", False),
+                "matchCreatorNotes": raw.get("matchCreatorNotes", False),
+                "outletName": raw.get("outletName", ""),
+                "triggers": copy.deepcopy(raw.get("triggers", [])),
+                "characterFilter": copy.deepcopy(
+                    raw.get(
+                        "characterFilter", {"isExclude": False, "names": [], "tags": []}
+                    )
+                ),
+            }
+        )
         entries[str(uid)] = entry
         uid += 1
     return {"entries": entries}
@@ -297,8 +307,7 @@ def build_character_book(
                 "comment": (
                     "Recovered lore; always active in probe"
                     if constant
-                    else
-                    "Recovered lore; activation inferred by RIPart probe"
+                    else "Recovered lore; activation inferred by RIPart probe"
                     if triggers
                     else "Recovered lore; original activation is unknown"
                 ),
@@ -312,7 +321,9 @@ def build_character_book(
                 "position": "before_char",
                 "case_sensitive": False,
                 "name": (
-                    "Recovered lore" if (triggers or constant) else "Recovered lore (disabled)"
+                    "Recovered lore"
+                    if (triggers or constant)
+                    else "Recovered lore (disabled)"
                 ),
                 "use_regex": False,
                 "extensions": {

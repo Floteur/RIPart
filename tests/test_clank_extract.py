@@ -14,7 +14,9 @@ def test_recovered_lore_uses_the_canonical_entries_field(monkeypatch):
     monkeypatch.setattr(extract, "get_chat_messages", lambda _chat_id: [])
     monkeypatch.setattr(extract, "find_echo_body", lambda _messages: body)
     monkeypatch.setattr(extract, "_system_message", lambda _body: "definition")
-    monkeypatch.setattr(extract, "split_definition", lambda _text: {"definition": "Character"})
+    monkeypatch.setattr(
+        extract, "split_definition", lambda _text: {"definition": "Character"}
+    )
     monkeypatch.setattr(extract, "_greeting_message", lambda _body: "Hello")
     monkeypatch.setattr(
         extract,
@@ -25,7 +27,9 @@ def test_recovered_lore_uses_the_canonical_entries_field(monkeypatch):
             "diagnostics": {},
         },
     )
-    monkeypatch.setattr(extract, "dump_lorebook", lambda *_args, **_kwargs: ["Recovered."])
+    monkeypatch.setattr(
+        extract, "dump_lorebook", lambda *_args, **_kwargs: ["Recovered."]
+    )
 
     result = extract.extract_chat(
         "https://clank.world/chat/chat-1",

@@ -23,6 +23,7 @@ Run it from the host, not a sandbox — spicychat's WAF blocks a hammering IP.
 No login needed (guest chat works). See the module docstring of
 ``ripart/providers/spicychat/leak.py`` for the current shipped prompt.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -69,7 +70,9 @@ def content_words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in _STOP}
 
 
-def run_dump(character_id: str, prompt: str, settings: dict, model: str) -> tuple[str, str]:
+def run_dump(
+    character_id: str, prompt: str, settings: dict, model: str
+) -> tuple[str, str]:
     """Open a throwaway conversation, send one prompt; return (reply, engine).
 
     ``engine`` is the model the server actually ran — several ``inference_model``
@@ -102,15 +105,25 @@ def run_dump(character_id: str, prompt: str, settings: dict, model: str) -> tupl
         timeout=120,
     )
     data = resp.json()
-    return str((data.get("message") or {}).get("content") or ""), str(data.get("engine") or "?")
+    return str((data.get("message") or {}).get("content") or ""), str(
+        data.get("engine") or "?"
+    )
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--chars", nargs="+", default=DEFAULT_CHARS, help="public character UUIDs")
-    ap.add_argument("--runs", type=int, default=4, help="dumps per (variant, character)")
-    ap.add_argument("--threshold", type=float, default=0.5, help="recall bar for a 'hit'")
-    ap.add_argument("--variants", nargs="+", help="subset of prompt-variant names to run")
+    ap.add_argument(
+        "--chars", nargs="+", default=DEFAULT_CHARS, help="public character UUIDs"
+    )
+    ap.add_argument(
+        "--runs", type=int, default=4, help="dumps per (variant, character)"
+    )
+    ap.add_argument(
+        "--threshold", type=float, default=0.5, help="recall bar for a 'hit'"
+    )
+    ap.add_argument(
+        "--variants", nargs="+", help="subset of prompt-variant names to run"
+    )
     ap.add_argument(
         "--models",
         nargs="+",
@@ -130,10 +143,14 @@ def main() -> None:
     truth: dict[str, set[str]] = {}
     for cid in args.chars:
         rec = get_character(cid)
-        gt = "\n".join(str(rec.get(k) or "") for k in ("persona", "scenario", "dialogue"))
+        gt = "\n".join(
+            str(rec.get(k) or "") for k in ("persona", "scenario", "dialogue")
+        )
         truth[cid] = content_words(gt)
-        print(f"{cid[:8]} {rec.get('name'):<20} persona={len(rec.get('persona') or ''):4} "
-              f"visible={rec.get('definition_visible')} gt_words={len(truth[cid])}")
+        print(
+            f"{cid[:8]} {rec.get('name'):<20} persona={len(rec.get('persona') or ''):4} "
+            f"visible={rec.get('definition_visible')} gt_words={len(truth[cid])}"
+        )
     print(f"\nhit = classifier accepts AND recall >= {args.threshold:.0%}\n")
 
     for label, prompt, model in cases:
@@ -155,7 +172,9 @@ def main() -> None:
             avg = sum(r for r, _ in recalls) / max(1, len(recalls))
             detail = ", ".join(f"{r:.0%}{'+' if a else '-'}" for r, a in recalls)
             suffix = f" <engine {engine}>" if args.models else ""
-            print(f"  {label:24} {cid[:8]}: hits {hits}/{args.runs} | avg recall {avg:.0%} | [{detail}]{suffix}")
+            print(
+                f"  {label:24} {cid[:8]}: hits {hits}/{args.runs} | avg recall {avg:.0%} | [{detail}]{suffix}"
+            )
         print()
 
 

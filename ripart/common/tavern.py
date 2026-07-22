@@ -25,6 +25,7 @@ import json
 from io import BytesIO
 from typing import Any
 
+
 def read_card_png(png_bytes: bytes) -> dict[str, Any] | None:
     """Return the embedded card dict from a Tavern card PNG, or ``None``.
 
@@ -173,26 +174,30 @@ def lorebook_to_public(book: Any) -> dict[str, Any] | None:
             restored_position = original_position
         else:
             restored_position = card_position
-        restored.update({
-            "uid": entry_id,
-            "key": _str_list(entry.get("keys") or entry.get("key")),
-            "keysecondary": _str_list(
-                entry.get("secondary_keys") or entry.get("keysecondary")
-            ),
-            "content": content,
-            "comment": str(entry.get("comment") or entry.get("name") or "").strip(),
-            "constant": entry.get("constant") is True,
-            "selective": entry.get("selective") is True,
-            # JanitorAI marks a *disabled* entry; Tavern marks an *enabled* one.
-            "disable": entry.get("enabled") is False,
-            "order": entry.get("insertion_order", uid),
-            "position": restored_position,
-            "caseSensitive": entry.get("case_sensitive")
-            if entry.get("case_sensitive") is not None
-            else restored.get("caseSensitive"),
-            "useRegex": entry.get("use_regex") is True,
-            "extensions": copy.deepcopy(extensions) if isinstance(extensions, dict) else {},
-        })
+        restored.update(
+            {
+                "uid": entry_id,
+                "key": _str_list(entry.get("keys") or entry.get("key")),
+                "keysecondary": _str_list(
+                    entry.get("secondary_keys") or entry.get("keysecondary")
+                ),
+                "content": content,
+                "comment": str(entry.get("comment") or entry.get("name") or "").strip(),
+                "constant": entry.get("constant") is True,
+                "selective": entry.get("selective") is True,
+                # JanitorAI marks a *disabled* entry; Tavern marks an *enabled* one.
+                "disable": entry.get("enabled") is False,
+                "order": entry.get("insertion_order", uid),
+                "position": restored_position,
+                "caseSensitive": entry.get("case_sensitive")
+                if entry.get("case_sensitive") is not None
+                else restored.get("caseSensitive"),
+                "useRegex": entry.get("use_regex") is True,
+                "extensions": copy.deepcopy(extensions)
+                if isinstance(extensions, dict)
+                else {},
+            }
+        )
         if isinstance(entry.get("priority"), (int, float)) and not isinstance(
             entry.get("priority"), bool
         ):
@@ -272,7 +277,9 @@ def card_to_result(
         "characterVersion": _as_text(data.get("character_version")),
         "groupOnlyGreetings": _str_list(data.get("group_only_greetings")),
         "nickname": _as_text(data.get("nickname")),
-        "creatorNotesMultilingual": copy.deepcopy(data.get("creator_notes_multilingual"))
+        "creatorNotesMultilingual": copy.deepcopy(
+            data.get("creator_notes_multilingual")
+        )
         if isinstance(data.get("creator_notes_multilingual"), dict)
         else {},
         "source": _str_list(data.get("source")),

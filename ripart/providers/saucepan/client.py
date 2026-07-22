@@ -345,7 +345,9 @@ def search_companions(
         if isinstance(data, dict):
             error = data.get("error")
             message = error.get("message") if isinstance(error, dict) else None
-        raise SaucepanError(message or f"could not list companions (HTTP {status})", status)
+        raise SaucepanError(
+            message or f"could not list companions (HTTP {status})", status
+        )
 
     items: Any = data.get("companions") if isinstance(data, dict) else None
     if not isinstance(items, list):

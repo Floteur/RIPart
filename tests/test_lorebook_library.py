@@ -33,7 +33,9 @@ def test_lorebook_record_is_shared_by_source_id_and_tracks_characters(tmp_path):
     second = update_lorebook_library(tmp_path, "char-b", _result(book))
 
     assert first == second
-    record = json.loads((tmp_path / "lorebooks" / "janitor" / "book-42.json").read_text())
+    record = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "book-42.json").read_text()
+    )
     assert record["sourceLorebookId"] == "book-42"
     assert record["characterIds"] == ["char-a", "char-b"]
     assert record["worldInfo"]["entries"] == book["worldInfo"]["entries"]
@@ -69,7 +71,9 @@ def test_private_entries_need_an_attached_lorebook_to_be_recorded(tmp_path):
     result["entries"] = ["Private setting detail.", "Private setting detail."]
     update_lorebook_library(tmp_path, "char-private", result)
     observation = json.loads(
-        (tmp_path / "lorebooks" / "janitor" / "unassigned" / "char-private.json").read_text()
+        (
+            tmp_path / "lorebooks" / "janitor" / "unassigned" / "char-private.json"
+        ).read_text()
     )
     assert observation["characterId"] == "char-private"
     assert observation["observations"] == [
@@ -89,7 +93,9 @@ def test_private_observations_accumulate_across_extractions(tmp_path):
     update_lorebook_library(tmp_path, "char-private", result)
 
     observation = json.loads(
-        (tmp_path / "lorebooks" / "janitor" / "unassigned" / "char-private.json").read_text()
+        (
+            tmp_path / "lorebooks" / "janitor" / "unassigned" / "char-private.json"
+        ).read_text()
     )
     assert [item["content"] for item in observation["observations"]] == [
         "First recovered detail.",
@@ -97,25 +103,27 @@ def test_private_observations_accumulate_across_extractions(tmp_path):
     ]
 
 
-def test_private_observation_is_attributed_when_shared_characters_leave_one_book(tmp_path):
-    first = _result(
-        {"id": "shared", "title": "Shared", "worldInfo": {"entries": {}}}
-    )
+def test_private_observation_is_attributed_when_shared_characters_leave_one_book(
+    tmp_path,
+):
+    first = _result({"id": "shared", "title": "Shared", "worldInfo": {"entries": {}}})
     first["publicLorebooks"].append(
         {"id": "other", "title": "Other", "worldInfo": {"entries": {}}}
     )
     first["entries"] = ["Shared private fact."]
     update_lorebook_library(tmp_path, "char-a", first)
 
-    second = _result(
-        {"id": "shared", "title": "Shared", "worldInfo": {"entries": {}}}
-    )
+    second = _result({"id": "shared", "title": "Shared", "worldInfo": {"entries": {}}})
     second["entries"] = ["Shared private fact."]
     update_lorebook_library(tmp_path, "char-b", second)
 
-    record = json.loads((tmp_path / "lorebooks" / "janitor" / "shared.json").read_text())
+    record = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "shared.json").read_text()
+    )
     assert record["recoveredObservations"][0]["content"] == "Shared private fact."
-    evidence = json.loads((tmp_path / "lorebooks" / "janitor" / "evidence.json").read_text())
+    evidence = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "evidence.json").read_text()
+    )
     item = next(iter(evidence["observations"].values()))
     assert item["attribution"] == {"status": "inferred", "candidates": ["shared"]}
     first_capture = json.loads(
@@ -140,13 +148,17 @@ def test_inaccessible_lorebook_reference_is_saved_for_later_reconciliation(tmp_p
     paths = update_lorebook_library(tmp_path, "char-private", result)
 
     assert paths == [str(tmp_path / "lorebooks" / "janitor" / "private-book.json")]
-    record = json.loads((tmp_path / "lorebooks" / "janitor" / "private-book.json").read_text())
+    record = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "private-book.json").read_text()
+    )
     assert record["entryCount"] == 0
     assert record["accessible"] is False
     assert record["characterIds"] == ["char-private"]
 
 
-def test_lorebook_record_keeps_provider_character_index_for_later_regeneration(tmp_path):
+def test_lorebook_record_keeps_provider_character_index_for_later_regeneration(
+    tmp_path,
+):
     book = {
         "id": "shared-world",
         "title": "Shared world",

@@ -101,7 +101,9 @@ def test_lorebook_entry_without_markers_is_constant_and_uses_title():
 
 
 def test_lorebook_skips_empty_and_nondict_entries():
-    world = sp._lorebook_world_info([{"text": "   "}, "nope", {"title": "x", "text": "real"}])
+    world = sp._lorebook_world_info(
+        [{"text": "   "}, "nope", {"title": "x", "text": "real"}]
+    )
     assert len(world) == 1
     assert world["0"]["content"] == "real"
 
@@ -140,7 +142,7 @@ def test_looks_like_definition():
     assert sp._looks_like_definition("x" * 1600)
     # Roleplay reply: narrative, short, no markers/headers -> not a definition.
     rp = (
-        '(Piper stands on the counter, bare thighs against the edge.) '
+        "(Piper stands on the counter, bare thighs against the edge.) "
         '"I should find a grocery store, huh?" *She pops a finger into the yogurt.*'
     )
     assert not sp._looks_like_definition(rp)
@@ -165,7 +167,11 @@ def test_split_example_section():
 
 
 def test_apply_leak_merges_into_character():
-    ch = {"description": "OLD", "exampleMessages": "", "definitionSource": "saucepan-partial"}
+    ch = {
+        "description": "OLD",
+        "exampleMessages": "",
+        "definitionSource": "saucepan-partial",
+    }
     sample = "```\n# Piper\nBubbly.\n\n## Example Dialogue\n{{char}}: Hey!\n```"
     sp._apply_leak(ch, sample)
     assert ch["definitionSource"] == "saucepan-leak"
@@ -182,10 +188,15 @@ def test_apply_leak_merges_into_character():
 
 def test_parse_companion_id():
     assert (
-        sp.parse_companion_id("https://saucepan.ai/companion/0e5f920b-322c-4286-9413-ad21566e5c50")
+        sp.parse_companion_id(
+            "https://saucepan.ai/companion/0e5f920b-322c-4286-9413-ad21566e5c50"
+        )
         == "0e5f920b-322c-4286-9413-ad21566e5c50"
     )
-    assert sp.parse_companion_id("0e5f920b-322c-4286-9413-ad21566e5c50") == "0e5f920b-322c-4286-9413-ad21566e5c50"
+    assert (
+        sp.parse_companion_id("0e5f920b-322c-4286-9413-ad21566e5c50")
+        == "0e5f920b-322c-4286-9413-ad21566e5c50"
+    )
     assert sp.parse_companion_id("https://example.com/nope") is None
     assert sp.parse_companion_id("") is None
 
@@ -198,7 +209,10 @@ def test_is_saucepan_url():
 
 def test_search_companions_posts_catalogue_filters():
     captured = {}
-    original_has_token, original_post_json = saucepan_client.has_token, saucepan_client._post_json
+    original_has_token, original_post_json = (
+        saucepan_client.has_token,
+        saucepan_client._post_json,
+    )
     try:
         saucepan_client.has_token = lambda: True
 
@@ -206,7 +220,11 @@ def test_search_companions_posts_catalogue_filters():
             captured["path"] = path
             captured["body"] = body
             captured["with_auth"] = with_auth
-            return True, 200, {"companions": [{"id": "one"}, "ignored"], "total_count": 12}
+            return (
+                True,
+                200,
+                {"companions": [{"id": "one"}, "ignored"], "total_count": 12},
+            )
 
         saucepan_client._post_json = fake_post_json
         assert sp.search_companions(
@@ -217,7 +235,10 @@ def test_search_companions_posts_catalogue_filters():
             include_nsfw=False,
         ) == {"companions": [{"id": "one"}], "total_count": 12}
     finally:
-        saucepan_client.has_token, saucepan_client._post_json = original_has_token, original_post_json
+        saucepan_client.has_token, saucepan_client._post_json = (
+            original_has_token,
+            original_post_json,
+        )
     assert captured["path"] == "/api/v1/search"
     assert captured["with_auth"] is True
     assert captured["body"]["tags"] == ["female"]
@@ -256,19 +277,27 @@ def test_set_provider_prompt_builds_patch_without_key():
     }
     captured = {}
 
-    def fake_request(method, path, *, with_auth, json_body=None, attempts=1, retry_5xx=False):
+    def fake_request(
+        method, path, *, with_auth, json_body=None, attempts=1, retry_5xx=False
+    ):
         captured["method"] = method
         captured["path"] = path
         captured["body"] = json_body
         return True, 200, {}
 
-    orig_list, orig_req = saucepan_leak.list_provider_configs, saucepan_leak._request_json
+    orig_list, orig_req = (
+        saucepan_leak.list_provider_configs,
+        saucepan_leak._request_json,
+    )
     try:
         saucepan_leak.list_provider_configs = lambda: [fake]
         saucepan_leak._request_json = fake_request
         old = sp.set_provider_prompt("cfg1", "NEW SYSTEM PROMPT")
     finally:
-        saucepan_leak.list_provider_configs, saucepan_leak._request_json = orig_list, orig_req
+        saucepan_leak.list_provider_configs, saucepan_leak._request_json = (
+            orig_list,
+            orig_req,
+        )
 
     assert old == "OLD"  # returns previous value for restore
     assert captured["method"] == "PATCH"
@@ -294,7 +323,9 @@ if __name__ == "__main__":
     import sys
     import traceback
 
-    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
+    tests = [
+        v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)
+    ]
     failed = 0
     for fn in tests:
         try:

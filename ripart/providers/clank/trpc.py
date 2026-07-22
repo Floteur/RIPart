@@ -42,7 +42,11 @@ def _unwrap_trpc(payload: Any) -> Any:
             j = err.get("json") if isinstance(err.get("json"), dict) else err
             message = (j or {}).get("message")
         raise ClankError(message or "tRPC error")
-    return (((entry or {}).get("result") or {}).get("data")) if isinstance(entry, dict) else None
+    return (
+        (((entry or {}).get("result") or {}).get("data"))
+        if isinstance(entry, dict)
+        else None
+    )
 
 
 def trpc_query(proc: str, input: dict[str, Any] | None = None) -> Any:
@@ -263,7 +267,11 @@ def iter_stories(
     cursor: str | None = None
     while True:
         page = list_stories(
-            sort=sort, limit=page_size, cursor=cursor, tags=tags, include_nsfw=include_nsfw
+            sort=sort,
+            limit=page_size,
+            cursor=cursor,
+            tags=tags,
+            include_nsfw=include_nsfw,
         )
         for item in page["items"]:
             yield item

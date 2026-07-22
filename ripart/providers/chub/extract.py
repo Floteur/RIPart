@@ -30,7 +30,9 @@ def _noop(_message: str) -> None:
     pass
 
 
-def _definition_to_card(node: dict[str, Any], definition: dict[str, Any]) -> dict[str, Any]:
+def _definition_to_card(
+    node: dict[str, Any], definition: dict[str, Any]
+) -> dict[str, Any]:
     """Wrap chub's ``definition`` object as a Tavern V2 card dict."""
     topics = [
         str(t).strip()

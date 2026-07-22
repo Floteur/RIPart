@@ -25,7 +25,9 @@ def load_env() -> None:
     os.environ["_RIPART_ENV_LOADED"] = "1"
     for path in env_paths():
         assignments = "\n".join(
-            line for line in path.read_text(encoding="utf-8").splitlines() if "=" in line
+            line
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if "=" in line
         )
         for key, value in dotenv_values(stream=io.StringIO(assignments)).items():
             if key and value is not None:

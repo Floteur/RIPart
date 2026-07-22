@@ -226,7 +226,10 @@ def test_upsert_creates_a_thread_with_the_rich_embed(tmp_path):
 def test_detail_embeds_include_card_text_but_not_lorebook_content():
     embeds = _detail_embeds_for(
         {
-            "character": {"description": "A full definition.", "scenario": "A scenario."},
+            "character": {
+                "description": "A full definition.",
+                "scenario": "A scenario.",
+            },
             "entries": ["Recovered private lore."],
             "publicLorebooks": [
                 {
@@ -274,9 +277,10 @@ def test_lorebook_files_are_importable_character_books():
     assert recovered["entries"][0]["content"] == "Recovered private lore."
     assert recovered["entries"][0]["constant"] is False
     assert recovered["entries"][0]["enabled"] is False
-    assert recovered["entries"][0]["extensions"]["ripart"]["recovery"][
-        "trigger_status"
-    ] == "unknown"
+    assert (
+        recovered["entries"][0]["extensions"]["ripart"]["recovery"]["trigger_status"]
+        == "unknown"
+    )
     assert public["name"] == "Public book"
     assert public["entries"][0]["keys"] == ["public-key"]
     assert public["entries"][0]["content"] == "Public lore for {{user}}."
@@ -284,7 +288,11 @@ def test_lorebook_files_are_importable_character_books():
 
 def test_detail_embed_batches_obey_discord_message_limits():
     embeds = [
-        {"title": f"Entry {index}", "description": "x" * 1000, "footer": {"text": "ripart archive"}}
+        {
+            "title": f"Entry {index}",
+            "description": "x" * 1000,
+            "footer": {"text": "ripart archive"},
+        }
         for index in range(12)
     ]
 
@@ -292,7 +300,9 @@ def test_detail_embed_batches_obey_discord_message_limits():
 
     assert len(batches) == 3
     assert all(len(batch) <= 10 for batch in batches)
-    assert all(sum(_embed_char_count(embed) for embed in batch) <= 6000 for batch in batches)
+    assert all(
+        sum(_embed_char_count(embed) for embed in batch) <= 6000 for batch in batches
+    )
 
 
 def test_lorebook_file_batches_obey_discord_attachment_limit():

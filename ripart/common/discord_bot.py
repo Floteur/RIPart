@@ -107,10 +107,15 @@ def _provider_color(name: str) -> object:
     meta = _PROVIDER_META.get(name, _PROVIDER_META["misc"])
     return _color_map.get(meta.get("color", "greyple"), _discord.Color.greyple())
 
+
 # Buffers for streaming partial CLI output to the progress embed, keyed by user_id.
 # Written by the worker thread, read by the asyncio timer task.
 _progress_by_user: dict[int, "ProgressCapture"] = {}
-_LINE_CLEAN = str.maketrans("", "", "∙∘○●◎◉❖✦✧⟳⇄↻✓✗ℹ⚠⏳⌛▶❌✅➤→▸▪•·﹣━─│┃││░▒▓█▄▀■□▪▫▬▲▼◄►◆◇○◎●◐◑◒◓◔◕◖◗◦◘◙◚◛◜◝◞◟◠◡•")
+_LINE_CLEAN = str.maketrans(
+    "",
+    "",
+    "∙∘○●◎◉❖✦✧⟳⇄↻✓✗ℹ⚠⏳⌛▶❌✅➤→▸▪•·﹣━─│┃││░▒▓█▄▀■□▪▫▬▲▼◄►◆◇○◎●◐◑◒◓◔◕◖◗◦◘◙◚◛◜◝◞◟◠◡•",
+)
 
 
 class ProgressCapture(io.StringIO):
@@ -134,6 +139,7 @@ class ProgressCapture(io.StringIO):
         if clean and len(clean) >= 4:
             self.step = clean[:120]
         return result
+
 
 # Keep the Discord command picker aligned with every user-facing RIPart CLI
 # command.  Its fields are generated from the Click parameters below, so
@@ -218,7 +224,11 @@ def parse_command(command: str) -> list[str]:
 
 def action_argv(prefix: tuple[str, ...], action: str, arguments: str) -> list[str]:
     """Build a CLI argv from a selected slash-command action and its options."""
-    return [*prefix, action, *parse_command(arguments)] if arguments.strip() else [*prefix, action]
+    return (
+        [*prefix, action, *parse_command(arguments)]
+        if arguments.strip()
+        else [*prefix, action]
+    )
 
 
 def _command_for(prefix: tuple[str, ...], action: str) -> click.Command:
@@ -229,7 +239,9 @@ def _command_for(prefix: tuple[str, ...], action: str) -> click.Command:
     for part in (*prefix, action):
         candidate = command.commands.get(part)
         if candidate is None:
-            raise RuntimeError(f"no Click command exists for {' '.join((*prefix, action))}")
+            raise RuntimeError(
+                f"no Click command exists for {' '.join((*prefix, action))}"
+            )
         command = candidate
     return command
 
@@ -238,7 +250,9 @@ def _discord_type(parameter: click.Parameter) -> object:
     """Translate the useful Click types into Discord's option types."""
     if isinstance(parameter.type, click.Choice):
         # Literal makes Discord render a picker rather than a free-form string.
-        return Literal.__getitem__(tuple(str(choice) for choice in parameter.type.choices))
+        return Literal.__getitem__(
+            tuple(str(choice) for choice in parameter.type.choices)
+        )
     if isinstance(parameter.type, click.types.IntParamType):
         return int
     if isinstance(parameter.type, click.types.FloatParamType):
@@ -282,7 +296,9 @@ def action_options(prefix: tuple[str, ...], action: str) -> tuple[ActionOption, 
                 ActionOption(
                     name="uuid" if is_extract_uuid else parameter.name,
                     annotation=str,
-                    description=_argument_description(parameter, is_extract_uuid=is_extract_uuid),
+                    description=_argument_description(
+                        parameter, is_extract_uuid=is_extract_uuid
+                    ),
                     required=parameter.required,
                     positional=True,
                 )
@@ -291,7 +307,10 @@ def action_options(prefix: tuple[str, ...], action: str) -> tuple[ActionOption, 
         if not isinstance(parameter, click.Option):
             continue
         # The first long option is the spelling users know from CLI help.
-        flag = next((item for item in parameter.opts if item.startswith("--")), parameter.opts[0])
+        flag = next(
+            (item for item in parameter.opts if item.startswith("--")),
+            parameter.opts[0],
+        )
         negative_flag = next(
             (item for item in parameter.secondary_opts if item.startswith("--")), None
         )
@@ -392,13 +411,17 @@ def _run_command(argv: list[str], *, buffer: io.StringIO | None = None) -> JobRe
 
     if buffer is None:
         buffer = io.StringIO()
-    console = Console(file=buffer, force_terminal=False, no_color=True, width=100, highlight=False)
+    console = Console(
+        file=buffer, force_terminal=False, no_color=True, width=200, highlight=False
+    )
     _capture.pair = {"out": console, "err": console}
     code = 0
     try:
         cli.main.main(args=list(argv), prog_name="rip", standalone_mode=False)
     except SystemExit as exc:
-        code = 0 if exc.code in (0, None) else exc.code if isinstance(exc.code, int) else 1
+        code = (
+            0 if exc.code in (0, None) else exc.code if isinstance(exc.code, int) else 1
+        )
     except Exception as exc:  # noqa: BLE001 - backstop; RipGroup already reports most errors
         code = 1
         console.print(f"error: {exc}")
@@ -496,7 +519,8 @@ class ExtractionQueue:
                     _LOG.warning(
                         "job for provider %s exceeded %ss timeout — "
                         "the worker thread continues but its result is discarded",
-                        provider, timeout,
+                        provider,
+                        timeout,
                     )
                     return JobResult(False, f"Timed out after {timeout}s.")
         finally:
@@ -532,9 +556,13 @@ def _admin_user_ids() -> set[int]:
     try:
         admin_ids = {int(value.strip()) for value in raw.split(",") if value.strip()}
     except ValueError as exc:
-        raise RuntimeError("DISCORD_ADMIN_IDS must be comma-separated numeric Discord user IDs") from exc
+        raise RuntimeError(
+            "DISCORD_ADMIN_IDS must be comma-separated numeric Discord user IDs"
+        ) from exc
     if not admin_ids:
-        raise RuntimeError("DISCORD_ADMIN_IDS must contain at least one Discord user ID")
+        raise RuntimeError(
+            "DISCORD_ADMIN_IDS must contain at least one Discord user ID"
+        )
     return admin_ids
 
 
@@ -544,7 +572,13 @@ def _route_provider(url: str) -> str:
     Mirrors the URL routing in ``ripart.cli.extract`` so the queue serialises a
     job behind the same provider the CLI would actually use.
     """
-    from ..providers import chub as cb, clank as ck, saucepan as sp, spicychat as sc, tavern as tv
+    from ..providers import (
+        chub as cb,
+        clank as ck,
+        saucepan as sp,
+        spicychat as sc,
+        tavern as tv,
+    )
 
     if ck.is_clank_url(url):
         return "clank"
@@ -579,28 +613,52 @@ def _configure_logging(verbose: int) -> None:
         datefmt="%H:%M:%S",
     )
     _LOG.setLevel(logging.DEBUG if verbose else logging.INFO)
-    logging.getLogger("discord").setLevel(logging.DEBUG if verbose > 1 else logging.INFO)
+    logging.getLogger("discord").setLevel(
+        logging.DEBUG if verbose > 1 else logging.INFO
+    )
     logging.getLogger("discord.http").setLevel(logging.WARNING)
     logging.getLogger("discord.gateway").setLevel(logging.WARNING)
     logging.getLogger("discord.webhook").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("httpx").setLevel(logging.INFO if verbose > 1 else logging.WARNING)
+    logging.getLogger("httpx").setLevel(
+        logging.INFO if verbose > 1 else logging.WARNING
+    )
     # watchfiles's internal watcher logs at DEBUG per event — a flood.
     logging.getLogger("watchfiles").setLevel(logging.WARNING)
     logging.getLogger("watchdog").setLevel(logging.WARNING)
 
 
 _ERROR_HINTS: list[tuple[tuple[str, ...], str]] = [
-    (("login", "log in", "authenticate", "unauthorized", "token"), "Run {login_cmd} first to authenticate."),
-    (("session", "cookie", "expired"), "Your session may have expired. Try {login_cmd} again."),
-    (("timeout", "timed out"), "The request timed out. Try again — if it persists, the provider may be slow."),
-    (("not found", "404", "no character"), "Double-check the URL or UUID — the character may have been deleted."),
-    (("rate limit", "429", "too many requests"), "Slow down! The provider is rate-limiting requests. Wait a moment and try again."),
-    (("cloudflare", "challenge"), "Cloudflare is blocking the request. Try running with `headed: true` or import a fresh session."),
+    (
+        ("login", "log in", "authenticate", "unauthorized", "token"),
+        "Run {login_cmd} first to authenticate.",
+    ),
+    (
+        ("session", "cookie", "expired"),
+        "Your session may have expired. Try {login_cmd} again.",
+    ),
+    (
+        ("timeout", "timed out"),
+        "The request timed out. Try again — if it persists, the provider may be slow.",
+    ),
+    (
+        ("not found", "404", "no character"),
+        "Double-check the URL or UUID — the character may have been deleted.",
+    ),
+    (
+        ("rate limit", "429", "too many requests"),
+        "Slow down! The provider is rate-limiting requests. Wait a moment and try again.",
+    ),
+    (
+        ("cloudflare", "challenge"),
+        "Cloudflare is blocking the request. Try running with `headed: true` or import a fresh session.",
+    ),
 ]
 
 
-def _error_hint(output: str, command_label: str, *, mention: Callable[..., str]) -> str | None:
+def _error_hint(
+    output: str, command_label: str, *, mention: Callable[..., str]
+) -> str | None:
     """Return a human-friendly hint based on common error patterns.
 
     The hint is embedded in the result embed as an actionable suggestion.
@@ -684,6 +742,36 @@ async def _hot_reload_watcher(client, ripart_root: str) -> None:
             _LOG.info("hot-reload — commands re-synced")
 
 
+_LIST_ITEMS_PER_PAGE = 5
+
+
+def _parse_list_output(provider: str, output: str) -> list[dict[str, str]]:
+    """Parse a provider list CLI table output into structured items."""
+    import re
+
+    items: list[dict[str, str]] = []
+    for line in output.strip().split("\n"):
+        stripped = line.strip()
+        if not stripped or set(stripped).issubset({"─", "━", "—", "-", " ", "═"}):
+            continue
+        cols = re.split(r"\s{2,}", stripped)
+        if len(cols) < 3:
+            continue
+        if not cols[0].strip().isdigit():
+            continue
+        name = cols[1].strip()[:80]
+        identifier = cols[-1].strip().rstrip("…")
+        if name and identifier:
+            if (
+                provider == "janitor"
+                and "/" not in identifier
+                and "." not in identifier
+            ):
+                identifier = f"https://janitorai.com/characters/{identifier}"
+            items.append({"name": name, "id": identifier})
+    return items
+
+
 def _build_commands(
     client,
     guild_id: int,
@@ -709,8 +797,367 @@ def _build_commands(
             embed.add_field(name=name, value=value, inline=True)
         return embed
 
+    # ── Interactive list view ─────────────────────────────────────────────
+
+    class ListView(discord.ui.View):
+        """Paginated interactive list with per-character extract buttons."""
+
+        def __init__(self, provider: str, items: list[dict], user_id: int) -> None:
+            super().__init__(timeout=300)
+            self.provider = provider
+            self.items = items
+            self.user_id = user_id
+            self.page = 0
+            self.selected_indices: set[int] = set()
+            self._build_page()
+
+        def _total_pages(self) -> int:
+            return max(
+                1, (len(self.items) + _LIST_ITEMS_PER_PAGE - 1) // _LIST_ITEMS_PER_PAGE
+            )
+
+        def _page_items(self) -> list[dict]:
+            start = self.page * _LIST_ITEMS_PER_PAGE
+            return self.items[start : start + _LIST_ITEMS_PER_PAGE]
+
+        def _build_embed(self) -> discord.Embed:
+            meta = _PROVIDER_META.get(self.provider, _PROVIDER_META["misc"])
+            page_items = self._page_items()
+            total = len(self.items)
+            start = self.page * _LIST_ITEMS_PER_PAGE
+            lines: list[str] = []
+            for i, item in enumerate(page_items):
+                num = start + i + 1
+                marker = "●" if (start + i) in self.selected_indices else "○"
+                lines.append(f"`{num:>3}.` {marker} **{item['name']}**")
+            embed = discord.Embed(
+                title=f"{meta['emoji']} {self.provider.title()} Characters",
+                description="\n".join(lines) if lines else "No characters found.",
+                color=_provider_color(self.provider),
+            )
+            sel = len(self.selected_indices)
+            embed.set_footer(
+                text=f"Page {self.page + 1}/{self._total_pages()} • {total} total • {sel} selected"
+            )
+            return embed
+
+        def _build_page(self) -> None:
+            self.clear_items()
+            for i, item in enumerate(self._page_items()):
+                global_idx = self.page * _LIST_ITEMS_PER_PAGE + i
+                style = (
+                    discord.ButtonStyle.primary
+                    if global_idx in self.selected_indices
+                    else discord.ButtonStyle.secondary
+                )
+                btn = discord.ui.Button(
+                    label=item["name"][:80], style=style, custom_id=f"lv_sel_{i}"
+                )
+                btn.callback = self._make_select_cb(global_idx)
+                self.add_item(btn)
+            total = self._total_pages()
+            prev = discord.ui.Button(
+                label="◀",
+                style=discord.ButtonStyle.gray,
+                custom_id="lv_prev",
+                disabled=self.page == 0,
+            )
+            prev.callback = self._prev_page
+            self.add_item(prev)
+            self.add_item(
+                discord.ui.Button(
+                    label=f"Page {self.page + 1}/{total}",
+                    style=discord.ButtonStyle.gray,
+                    custom_id="lv_page",
+                    disabled=True,
+                )
+            )
+            close = discord.ui.Button(
+                label="✕", style=discord.ButtonStyle.red, custom_id="lv_close"
+            )
+            close.callback = self._close
+            self.add_item(close)
+            nxt = discord.ui.Button(
+                label="▶",
+                style=discord.ButtonStyle.gray,
+                custom_id="lv_next",
+                disabled=self.page >= total - 1,
+            )
+            nxt.callback = self._next_page
+            self.add_item(nxt)
+            sel = len(self.selected_indices)
+            extract = discord.ui.Button(
+                label=f"📥 Extract {sel}" if sel else "📥 Extract",
+                style=discord.ButtonStyle.green if sel else discord.ButtonStyle.gray,
+                custom_id="lv_extract",
+                disabled=sel == 0,
+            )
+            extract.callback = self._extract
+            self.add_item(extract)
+
+        def _make_select_cb(self, global_idx: int):
+            async def cb(interaction: discord.Interaction) -> None:
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message(
+                        "Not your list.", ephemeral=True
+                    )
+                    return
+                self.selected_indices.symmetric_difference_update({global_idx})
+                self._build_page()
+                await interaction.response.edit_message(
+                    embed=self._build_embed(), view=self
+                )
+
+            return cb
+
+        async def _prev_page(self, interaction: discord.Interaction) -> None:
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message(
+                    "Not your list.", ephemeral=True
+                )
+                return
+            self.page = max(0, self.page - 1)
+            self._build_page()
+            await interaction.response.edit_message(
+                embed=self._build_embed(), view=self
+            )
+
+        async def _next_page(self, interaction: discord.Interaction) -> None:
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message(
+                    "Not your list.", ephemeral=True
+                )
+                return
+            self.page = min(self._total_pages() - 1, self.page + 1)
+            self._build_page()
+            await interaction.response.edit_message(
+                embed=self._build_embed(), view=self
+            )
+
+        async def _close(self, interaction: discord.Interaction) -> None:
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message(
+                    "Not your list.", ephemeral=True
+                )
+                return
+            await interaction.response.edit_message(view=None)
+            self.stop()
+
+        async def _extract(self, interaction: discord.Interaction) -> None:
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message(
+                    "Not your list.", ephemeral=True
+                )
+                return
+            if not self.selected_indices:
+                await interaction.response.send_message(
+                    "Select a character first.", ephemeral=True
+                )
+                return
+            selected = sorted(self.selected_indices)
+            if interaction.guild_id != guild_id or (
+                channel_id is not None and interaction.channel_id != channel_id
+            ):
+                hint = ""
+                ch = interaction.guild.get_channel(channel_id)
+                if ch:
+                    hint = f" Use <#{channel_id}>."
+                await interaction.response.send_message(
+                    f"⛔ Not available in this channel.{hint}", ephemeral=True
+                )
+                return
+            label = f"{self.provider} extract"
+            if not queue.reserve(self.user_id, label, self.provider):
+                existing = queue.active_job(self.user_id)
+                running = (
+                    f"Currently running: `{existing.command_label}` on **{existing.provider}** lane.\n"
+                    if existing
+                    else ""
+                )
+                await interaction.response.send_message(
+                    embed=discord.Embed(
+                        title=f"rip {label}",
+                        description=f"⛔ Already running.\n{running}Only one at a time — wait for it to finish.",
+                        color=discord.Color.red(),
+                    ),
+                    ephemeral=True,
+                )
+                return
+
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+
+            total = len(selected)
+            results: list[tuple[int, JobResult]] = []
+            _LOG.info(
+                "list-extract %d selection(s) for %s (%s) [lane=%s]",
+                total,
+                interaction.user,
+                self.user_id,
+                self.provider,
+            )
+            started_at = time.monotonic()
+
+            for seq, idx in enumerate(selected, start=1):
+                item = self.items[idx]
+                argv = [self.provider, "extract", item["id"]]
+                item_label = f"{label} ({seq}/{total})"
+                buf = ProgressCapture()
+                _progress_by_user[self.user_id] = buf
+                finished = asyncio.Event()
+                refresh_tasks: list[asyncio.Task] = []
+                status_msg: list[discord.Message | None] = [None]
+                local_started: float | None = None
+
+                async def on_queued(position: int) -> None:
+                    meta = _PROVIDER_META.get(self.provider, _PROVIDER_META["misc"])
+                    note = (
+                        f"Extracting **{item['name']}**… {meta['emoji']} ({seq}/{total})"
+                        if position == 1
+                        else f"Queued **{item['name']}** — position {position} in the **{self.provider}** lane {meta['emoji']}"
+                    )
+                    await interaction.followup.send(
+                        embed=discord.Embed(
+                            title=f"rip {item_label}",
+                            description=f"⌛ {note}",
+                            color=discord.Color.blurple(),
+                        ),
+                        ephemeral=True,
+                    )
+
+                async def on_start() -> None:
+                    nonlocal local_started
+                    local_started = time.monotonic()
+                    finished.clear()
+                    meta = _PROVIDER_META.get(self.provider, _PROVIDER_META["misc"])
+                    embed = discord.Embed(
+                        title=f"rip {item_label}",
+                        description=f"▶ Running **{item['name']}** {meta['emoji']}",
+                        color=discord.Color.gold(),
+                    )
+                    status_msg[0] = await interaction.followup.send(
+                        embed=embed, ephemeral=True
+                    )
+                    refresh_tasks.append(
+                        asyncio.create_task(
+                            _list_timer(
+                                status_msg,
+                                item_label,
+                                self.provider,
+                                finished,
+                                lambda: local_started or 0.0,
+                                buf,
+                            ),
+                            name="ripart-list-timer",
+                        )
+                    )
+
+                async def on_timeout() -> None:
+                    with contextlib.suppress(Exception):
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title=f"rip {item_label}",
+                                description="⚠ Timed out — may still be finishing in the background.",
+                                color=discord.Color.orange(),
+                            ),
+                            ephemeral=True,
+                        )
+
+                result: JobResult
+                try:
+                    result = await queue.run(
+                        self.provider,
+                        lambda: _run_command(argv, buffer=buf),
+                        on_queued=on_queued,
+                        on_start=on_start,
+                        on_timeout=on_timeout,
+                    )
+                except Exception as exc:
+                    _LOG.exception("list-extract `%s` crashed", item_label)
+                    result = JobResult(False, f"internal error: {exc}")
+                finally:
+                    _progress_by_user.pop(self.user_id, None)
+                    finished.set()
+                    for t in refresh_tasks:
+                        t.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        for t in refresh_tasks:
+                            await t
+
+                results.append((idx, result))
+
+            queue.release(self.user_id)
+            duration = int(time.monotonic() - started_at)
+            ok_count = sum(1 for _, r in results if r.ok)
+            _LOG.info(
+                "finished %d list-extract(s) for %s — %d/%d ok in %ds",
+                total,
+                interaction.user,
+                ok_count,
+                total,
+                duration,
+            )
+            summary_embed = discord.Embed(
+                title=f"rip {self.provider} extract ({total})",
+                description=f"✅ {ok_count}/{total} extracted in {_elapsed_pretty(duration)}",
+                color=discord.Color.green()
+                if ok_count == total
+                else discord.Color.gold(),
+            )
+            failure_lines: list[str] = []
+            for idx, r in results:
+                item = self.items[idx]
+                if r.ok:
+                    continue
+                name = item["name"][:50]
+                snippet = (r.text or "")[:_INLINE_OUTPUT_LIMIT]
+                failure_lines.append(f"**{name}** — {snippet}")
+            if failure_lines:
+                summary_embed.add_field(
+                    name="Failures",
+                    value="\n".join(failure_lines[:_INLINE_OUTPUT_LIMIT]),
+                    inline=False,
+                )
+            # Send summary to the user — the view may be gone, so use followup
+            with contextlib.suppress(Exception):
+                await interaction.followup.send(embed=summary_embed, ephemeral=True)
+
+    async def _list_timer(
+        msg_ref: list,
+        label: str,
+        provider: str,
+        finished: asyncio.Event,
+        started_at,
+        buf: ProgressCapture,
+    ) -> None:
+        while not finished.is_set():
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=3)
+                return
+            except asyncio.TimeoutError:
+                pass
+            elapsed = time.monotonic() - (started_at() or time.monotonic())
+            embed = discord.Embed(
+                title=f"rip {label}",
+                description=f"▶ Running {_PROVIDER_META.get(provider, _PROVIDER_META['misc'])['emoji']} **{provider}**",
+                color=discord.Color.gold(),
+            )
+            embed.add_field(name="Elapsed", value=_elapsed_pretty(elapsed), inline=True)
+            if buf and buf.step:
+                embed.add_field(name="Step", value=f"`{buf.step}`", inline=True)
+            with contextlib.suppress(Exception):
+                msg = msg_ref[0]
+                if msg is not None:
+                    await msg.edit(embed=embed)
+
     async def dispatch(
-        interaction, argv: list[str], *, command_label: str, provider: str, is_extraction: bool
+        interaction,
+        argv: list[str],
+        *,
+        command_label: str,
+        provider: str,
+        is_extraction: bool,
     ) -> None:
         nonlocal bot_started
         if interaction.guild_id != guild_id or (
@@ -722,7 +1169,8 @@ def _build_commands(
                 if channel:
                     hint = f" Use <#{channel_id}>."
             await interaction.response.send_message(
-                f"⛔ This command isn't available in this channel.{hint}", ephemeral=True
+                f"⛔ This command isn't available in this channel.{hint}",
+                ephemeral=True,
             )
             return
         title = f"rip {command_label}"
@@ -735,7 +1183,8 @@ def _build_commands(
                 existing = queue.active_job(user_id)
                 running = (
                     f"Currently running: `{existing.command_label}` on **{existing.provider}** lane.\n"
-                    if existing is not None else ""
+                    if existing is not None
+                    else ""
                 )
                 msg = (
                     "⛔ You already have a command running or queued.\n"
@@ -743,7 +1192,8 @@ def _build_commands(
                     "Only one at a time — wait for it to finish."
                 )
                 await interaction.response.send_message(
-                    embed=_embed(title, msg, discord.Color.red()), ephemeral=True,
+                    embed=_embed(title, msg, discord.Color.red()),
+                    ephemeral=True,
                 )
                 return
 
@@ -778,7 +1228,9 @@ def _build_commands(
             finished.clear()
             meta = _PROVIDER_META.get(provider, _PROVIDER_META["misc"])
             await interaction.edit_original_response(
-                embed=make_embed(f"▶ Running {meta['emoji']} **{provider}**", discord.Color.gold())
+                embed=make_embed(
+                    f"▶ Running {meta['emoji']} **{provider}**", discord.Color.gold()
+                )
             )
             refresh_tasks.append(
                 asyncio.create_task(refresh_status(), name="ripart-discord-status")
@@ -819,14 +1271,20 @@ def _build_commands(
 
         _LOG.info(
             "queued `%s` for %s (%s) [lane=%s]",
-            command_label, interaction.user, user_id, provider,
+            command_label,
+            interaction.user,
+            user_id,
+            provider,
         )
         result: JobResult
         try:
             await interaction.response.defer(thinking=True, ephemeral=not is_public)
             result = await queue.run(
-                provider, lambda: _run_command(argv, buffer=buf),
-                on_queued=on_queued, on_start=on_start, on_timeout=on_timeout,
+                provider,
+                lambda: _run_command(argv, buffer=buf),
+                on_queued=on_queued,
+                on_start=on_start,
+                on_timeout=on_timeout,
             )
         except Exception as exc:
             _LOG.exception("job `%s` crashed", command_label)
@@ -841,10 +1299,35 @@ def _build_commands(
             if limited:
                 queue.release(user_id)
 
+        # List commands → interactive paginated view
+        if result.ok and command_label.endswith(" list") and result.text:
+            items = _parse_list_output(provider, result.text)
+            if items:
+                list_view = ListView(provider=provider, items=items, user_id=user_id)
+                meta = _PROVIDER_META.get(provider, _PROVIDER_META["misc"])
+                embed = discord.Embed(
+                    title=f"{meta['emoji']} {provider.title()} Characters",
+                    description=f"Found {len(items)} character(s). Select one and click **Extract**.",
+                    color=_provider_color(provider),
+                )
+                try:
+                    await interaction.edit_original_response(
+                        embed=embed, view=list_view
+                    )
+                    return
+                except Exception:
+                    _LOG.warning(
+                        "failed to edit list view for %s, falling back to text embed",
+                        command_label,
+                    )
+
         duration = int(time.monotonic() - started_at) if started_at else 0
         _LOG.info(
             "finished `%s` for %s — %s in %ds",
-            command_label, interaction.user, "ok" if result.ok else "fail", duration,
+            command_label,
+            interaction.user,
+            "ok" if result.ok else "fail",
+            duration,
         )
         emoji = _status_emoji(result.ok, result.text or "")
         status_text = f"{emoji} {'Completed' if result.ok else 'Failed'}"
@@ -856,14 +1339,17 @@ def _build_commands(
         long_output = len(output) > _INLINE_OUTPUT_LIMIT
         attachment = (
             discord.File(io.BytesIO(output.encode("utf-8")), filename="rip-output.txt")
-            if long_output else None
+            if long_output
+            else None
         )
 
         meta = _PROVIDER_META.get(provider, _PROVIDER_META["misc"])
         provider_color = _provider_color(provider)
         result_color = provider_color if result.ok else color
 
-        result_embed = _embed(title, status_text, result_color, [("Duration", _elapsed_pretty(duration))])
+        result_embed = _embed(
+            title, status_text, result_color, [("Duration", _elapsed_pretty(duration))]
+        )
         if is_extraction and provider != "misc":
             result_embed.add_field(
                 name="Provider",
@@ -873,7 +1359,9 @@ def _build_commands(
 
         if command_label == "status":
             snap = queue.snapshot()
-            result_embed.add_field(name="⏱️ Bot uptime", value=_fmt_uptime(time.monotonic() - bot_started))
+            result_embed.add_field(
+                name="⏱️ Bot uptime", value=_fmt_uptime(time.monotonic() - bot_started)
+            )
             result_embed.add_field(name="🚀 In flight", value=str(snap["in_flight"]))
             lanes = ", ".join(snap["busy_lanes"]) or "—"
             result_embed.add_field(name="🛤️ Busy lanes", value=lanes)
@@ -886,7 +1374,9 @@ def _build_commands(
             result_embed.add_field(name="🛡️ Admins", value=str(len(admin_ids)))
 
         if not result.ok and output and output != "(no output)":
-            hint = _error_hint(output, command_label, mention=interaction.client.cmd_mention)
+            hint = _error_hint(
+                output, command_label, mention=interaction.client.cmd_mention
+            )
             if hint:
                 result_embed.add_field(name="💡 Suggestion", value=hint, inline=False)
 
@@ -901,22 +1391,35 @@ def _build_commands(
             snippet = output[:1_500]
             if len(output) > 1_500:
                 snippet += "\n\n… (truncated)"
-            result_embed.add_field(name="📄 Output", value=f"```\n{snippet}\n```", inline=False)
+            result_embed.add_field(
+                name="📄 Output", value=f"```\n{snippet}\n```", inline=False
+            )
 
         async def _send_private(payload, **kw):
             try:
                 await interaction.followup.send(**payload, **kw)
             except discord.HTTPException:
-                _LOG.warning("failed to send private output to %s; falling back", user_id)
+                _LOG.warning(
+                    "failed to send private output to %s; falling back", user_id
+                )
                 try:
                     note = "*(private delivery failed; output shown below)*"
                     if is_public:
                         await interaction.edit_original_response(
-                            embed=make_embed(f"{status_text} — {note}", discord.Color.orange(), [("Duration", f"{duration}s")])
+                            embed=make_embed(
+                                f"{status_text} — {note}",
+                                discord.Color.orange(),
+                                [("Duration", f"{duration}s")],
+                            )
                         )
                     else:
                         await interaction.edit_original_response(
-                            embed=_embed(title, f"{status_text}\n{note}", color, [("Duration", f"{duration}s")])
+                            embed=_embed(
+                                title,
+                                f"{status_text}\n{note}",
+                                color,
+                                [("Duration", f"{duration}s")],
+                            )
                         )
                 except Exception:
                     pass
@@ -983,7 +1486,9 @@ def _build_commands(
         for name, meta in _PROVIDER_META.items():
             if name == "misc":
                 continue
-            provider_lines.append(f"{meta['emoji']} **{name.title()}** — {meta['description']}")
+            provider_lines.append(
+                f"{meta['emoji']} **{name.title()}** — {meta['description']}"
+            )
         embed.add_field(
             name="🏷️ Providers",
             value="\n".join(provider_lines),
@@ -1005,11 +1510,15 @@ def _build_commands(
         embed.set_footer(text="RIPart — free AI character extraction")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    def add_action(parent, *, prefix: tuple[str, ...], action: str, description: str) -> None:
+    def add_action(
+        parent, *, prefix: tuple[str, ...], action: str, description: str
+    ) -> None:
         # Special-case: the `help` action is a Discord-only command with no CLI counterpart.
         if action == "help" and not prefix:
             parent.add_command(
-                app_commands.Command(name="help", description=description, callback=_help_command)
+                app_commands.Command(
+                    name="help", description=description, callback=_help_command
+                )
             )
             return
 
@@ -1048,7 +1557,9 @@ def _build_commands(
         callback.__name__ = f"{('_'.join(prefix) or 'root')}_{action}".replace("-", "_")
         callback.__signature__ = inspect.Signature(
             [
-                inspect.Parameter("interaction", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+                inspect.Parameter(
+                    "interaction", inspect.Parameter.POSITIONAL_OR_KEYWORD
+                ),
                 *[
                     inspect.Parameter(
                         field.name,
@@ -1067,7 +1578,9 @@ def _build_commands(
             field.name: field.name.replace("_", "-") for field in fields
         }
         parent.add_command(
-            app_commands.Command(name=action, description=description, callback=callback)
+            app_commands.Command(
+                name=action, description=description, callback=callback
+            )
         )
 
     for action, description in _ROOT_ACTIONS.items():
@@ -1077,7 +1590,12 @@ def _build_commands(
             name=provider, description=f"{provider} RIPart actions."
         )
         for action, description in actions.items():
-            add_action(provider_group, prefix=(provider,), action=action, description=description)
+            add_action(
+                provider_group,
+                prefix=(provider,),
+                action=action,
+                description=description,
+            )
         rip_group.add_command(provider_group)
     client.tree.add_command(rip_group, guild=guild)
 
@@ -1133,13 +1651,15 @@ def run_discord_bot(*, verbose: int = 0, reload: bool = False) -> None:
 
         def _build_cmd_map(self, synced: list) -> None:
             from discord.app_commands.models import AppCommandGroup as Acg
+
             def walk(opt, prefix):
-                if not hasattr(opt, 'options'):
+                if not hasattr(opt, "options"):
                     return
                 for sub in opt.options:
                     if isinstance(sub, Acg):
                         self._cmd_mentions[sub.qualified_name] = sub.mention
                         walk(sub, prefix)
+
             self._cmd_mentions.clear()
             for cmd in synced:
                 self._cmd_mentions[cmd.name] = cmd.mention
@@ -1164,11 +1684,16 @@ def run_discord_bot(*, verbose: int = 0, reload: bool = False) -> None:
             self._build_cmd_map(synced)
             _LOG.info(
                 "gateway ready as %s — guild %s, channel %s, %d admin(s); %d command(s) synced",
-                self.user, guild_id, channel_id or "any", len(admin_ids), len(synced),
+                self.user,
+                guild_id,
+                channel_id or "any",
+                len(admin_ids),
+                len(synced),
             )
             if self._reload:
                 asyncio.create_task(
-                    _hot_reload_watcher(self, self._ripart_root), name="ripart-hot-reload"
+                    _hot_reload_watcher(self, self._ripart_root),
+                    name="ripart-hot-reload",
                 )
                 _LOG.info(
                     "hot-reload on (watchfiles) — saved edits rebuild commands and reload providers; "

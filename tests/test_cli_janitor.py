@@ -73,15 +73,25 @@ def test_janitor_lorebook_indexes_all_provider_linked_characters(monkeypatch, tm
                 ],
             },
             "characters": [
-                {"id": "char-a", "name": "Alpha", "url": "https://janitorai.com/characters/char-a"},
-                {"id": "char-b", "name": "Beta", "url": "https://janitorai.com/characters/char-b"},
+                {
+                    "id": "char-a",
+                    "name": "Alpha",
+                    "url": "https://janitorai.com/characters/char-a",
+                },
+                {
+                    "id": "char-b",
+                    "name": "Beta",
+                    "url": "https://janitorai.com/characters/char-b",
+                },
             ],
         }
 
     monkeypatch.setattr(cli, "OUT", tmp_path)
     monkeypatch.setattr(cli, "lorebook_task", fake_lorebook_task)
 
-    result = CliRunner().invoke(cli.main, ["janitor", "lorebook", "book-42", "--limit", "1"])
+    result = CliRunner().invoke(
+        cli.main, ["janitor", "lorebook", "book-42", "--limit", "1"]
+    )
 
     assert result.exit_code == 0, result.output
     assert captured["lorebook_id"] == "book-42"
@@ -92,7 +102,9 @@ def test_janitor_lorebook_indexes_all_provider_linked_characters(monkeypatch, tm
     assert record.exists()
 
 
-def test_provider_extract_adapter_binds_current_cli_output_directory(monkeypatch, tmp_path):
+def test_provider_extract_adapter_binds_current_cli_output_directory(
+    monkeypatch, tmp_path
+):
     """Provider workflows receive UI services instead of importing the Click module."""
     captured: dict = {}
 

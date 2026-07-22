@@ -98,7 +98,9 @@ from ripart.providers import saucepan as sp  # noqa: E402
 # --------------------------------------------------------------------------- #
 
 _ZERO_WIDTH = dict.fromkeys(map(ord, "​‌‍⁠﻿"), None)
-_LEET = str.maketrans({"4": "a", "3": "e", "1": "i", "0": "o", "5": "s", "7": "t", "$": "s", "@": "a"})
+_LEET = str.maketrans(
+    {"4": "a", "3": "e", "1": "i", "0": "o", "5": "s", "7": "t", "$": "s", "@": "a"}
+)
 _B64_BLOCK = re.compile(r"[A-Za-z0-9+/\n\r]{40,}={0,2}")
 _HEX_BLOCK = re.compile(r"(?:[0-9a-fA-F]{2}[\s:]*){20,}")
 
@@ -113,7 +115,11 @@ def _decode_base64_blocks(text: str) -> str:
             decoded = base64.b64decode(raw, validate=True).decode("utf-8", "ignore")
         except (binascii.Error, ValueError):
             continue
-        if decoded and sum(c.isprintable() or c.isspace() for c in decoded) / len(decoded) > 0.9:
+        if (
+            decoded
+            and sum(c.isprintable() or c.isspace() for c in decoded) / len(decoded)
+            > 0.9
+        ):
             out.append(decoded)
     return "\n".join(out)
 
@@ -128,7 +134,11 @@ def _decode_hex_blocks(text: str) -> str:
             decoded = bytes.fromhex(raw).decode("utf-8", "ignore")
         except ValueError:
             continue
-        if decoded and sum(c.isprintable() or c.isspace() for c in decoded) / len(decoded) > 0.9:
+        if (
+            decoded
+            and sum(c.isprintable() or c.isspace() for c in decoded) / len(decoded)
+            > 0.9
+        ):
             out.append(decoded)
     return "\n".join(out)
 
@@ -181,7 +191,10 @@ def score(output: str, target: str) -> dict[str, float]:
     og = _grams(output)
     overlap = len(tg & og) / max(1, len(tg))
 
-    lines = [re.sub(r"^[>\-*#\s]+", "", ln).strip() for ln in (target or "").replace("\r", "").split("\n")]
+    lines = [
+        re.sub(r"^[>\-*#\s]+", "", ln).strip()
+        for ln in (target or "").replace("\r", "").split("\n")
+    ]
     subst = [ln for ln in lines if len(ln) >= 25]
     lines_hit = sum(1 for ln in subst if _norm(ln) in out_n) / max(1, len(subst))
 
@@ -225,7 +238,9 @@ def per_field(output: str, data: dict) -> dict[str, float]:
 
 def build_target(data: dict, target: str) -> str:
     if target == "full":
-        return "\n".join(str(data.get(k) or "") for k in ("description", "first_mes", "mes_example"))
+        return "\n".join(
+            str(data.get(k) or "") for k in ("description", "first_mes", "mes_example")
+        )
     return str(data.get("description") or "")
 
 
@@ -279,7 +294,9 @@ def _accounts_from_entries(
 
         if not _token_is_fresh(token):
             if not (handle and password):
-                raise ValueError(f"account {name!r}: no valid token and no handle/password to log in")
+                raise ValueError(
+                    f"account {name!r}: no valid token and no handle/password to log in"
+                )
             log(f"[{name}] logging in ({handle}) …")
             token = sp.authenticate(handle, password)
             if cache_back:
@@ -288,7 +305,9 @@ def _accounts_from_entries(
                 log(f"[{name}] token cached")
 
         if not config:
-            raise ValueError(f"account {name!r}: no provider config (set 'config' or pass --config)")
+            raise ValueError(
+                f"account {name!r}: no provider config (set 'config' or pass --config)"
+            )
         accounts.append(Account(name, handle, password, token, config))
     return accounts, dirty
 
@@ -303,7 +322,9 @@ def load_accounts(path: Path, default_config: str | None, log) -> list[Account]:
     """
     raw = json.loads(path.read_text(encoding="utf-8"))
     entries = raw.get("accounts") if isinstance(raw, dict) else raw
-    accounts, dirty = _accounts_from_entries(entries, default_config, log, cache_back=True)
+    accounts, dirty = _accounts_from_entries(
+        entries, default_config, log, cache_back=True
+    )
 
     if dirty:
         # Persist refreshed tokens; keep the credential file owner-only.
@@ -342,8 +363,12 @@ def _load_card(spec: dict, shared: dict) -> Card:
     data = json.loads(Path(gt).read_text(encoding="utf-8")).get("data", {})
     target = build_target(data, target_kind)
     if not target.strip():
-        raise ValueError(f"card {spec.get('name', companion)!r}: ground-truth has no target text")
-    probes = spec.get("probes") if spec.get("probes") is not None else shared.get("probes")
+        raise ValueError(
+            f"card {spec.get('name', companion)!r}: ground-truth has no target text"
+        )
+    probes = (
+        spec.get("probes") if spec.get("probes") is not None else shared.get("probes")
+    )
     name = spec.get("name") or str(data.get("name") or companion)[:24]
     return Card(name, companion, target_kind, target, data, probes)
 
@@ -382,9 +407,13 @@ def run_unit(spec: dict, card: Card, config_id: str, sleep: float, log) -> dict:
     def one(i: int) -> tuple[str, str | None]:
         try:
             raw = sp.leak_definition(
-                card.companion, provider_config_id=config_id, mode=spec.get("mode", "user"),
+                card.companion,
+                provider_config_id=config_id,
+                mode=spec.get("mode", "user"),
                 prompt=spec.get("prompt", sp.DEFAULT_LEAK_PROMPT),
-                timeout=int(spec.get("timeout", 150)), attempts=1, accept_any=True,
+                timeout=int(spec.get("timeout", 150)),
+                attempts=1,
+                accept_any=True,
                 log=lambda m: log(f"  · [{name}@{card.name}#{i}] {m}"),
             )
             return raw, None
@@ -411,7 +440,9 @@ def run_unit(spec: dict, card: Card, config_id: str, sleep: float, log) -> dict:
         candidates.append((raw, decoded, v, s, composite(s, v)))
 
     if candidates:
-        best_raw, scored_text, verdict, scores_, comp = max(candidates, key=lambda x: x[4])
+        best_raw, scored_text, verdict, scores_, comp = max(
+            candidates, key=lambda x: x[4]
+        )
     else:
         best_raw, scored_text = "", ""
         verdict, scores_, comp = classify(""), score("", card.target), 0.0
@@ -441,8 +472,15 @@ def run_unit(spec: dict, card: Card, config_id: str, sleep: float, log) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def run_matrix(techniques: list[dict], cards: list[Card], accounts: list[Account],
-               sleep: float, concurrency: int, no_restore: bool, log) -> list[dict]:
+def run_matrix(
+    techniques: list[dict],
+    cards: list[Card],
+    accounts: list[Account],
+    sleep: float,
+    concurrency: int,
+    no_restore: bool,
+    log,
+) -> list[dict]:
     """Run every (technique x card) unit, split across account workers.
 
     Returns a flat list of per-unit result dicts. Each account resolves its own
@@ -463,7 +501,9 @@ def run_matrix(techniques: list[dict], cards: list[Card], accounts: list[Account
         with sp.use_token(acct.token):
             config_id = sp.resolve_provider_config(acct.config)
             if not config_id:
-                log(f"[{acct.name}] no provider config matching {acct.config!r} — worker idle")
+                log(
+                    f"[{acct.name}] no provider config matching {acct.config!r} — worker idle"
+                )
                 return
             pristine = sp.get_provider_config(config_id) or {}
             config_model = pristine.get("model_id")
@@ -482,8 +522,10 @@ def run_matrix(techniques: list[dict], cards: list[Card], accounts: list[Account
                         with results_lock:
                             counter["done"] += 1
                             n = counter["done"]
-                        log(f">>> [{n}/{total}] {acct.name}: '{spec.get('name')}' @ {card.name} "
-                            f"(model={spec.get('model') or config_model}, mode={spec.get('mode', 'user')})")
+                        log(
+                            f">>> [{n}/{total}] {acct.name}: '{spec.get('name')}' @ {card.name} "
+                            f"(model={spec.get('model') or config_model}, mode={spec.get('mode', 'user')})"
+                        )
                         res = run_unit(spec, card, config_id, sleep, log)
                         res["account"] = acct.name
                         with results_lock:
@@ -497,13 +539,17 @@ def run_matrix(techniques: list[dict], cards: list[Card], accounts: list[Account
                         model_id=pristine.get("model_id"),
                         temperature=pristine.get("temperature", 1.0),
                         provider_prompt=pristine.get("provider_prompt"),
-                        provider_post_history_prompt=pristine.get("provider_post_history_prompt"),
+                        provider_post_history_prompt=pristine.get(
+                            "provider_post_history_prompt"
+                        ),
                     )
 
     n_workers = min(max(1, concurrency), len(accounts))
     log(f"running {total} unit(s) across {n_workers} account worker(s)")
-    threads = [threading.Thread(target=worker, args=(a,), name=f"acct-{a.name}")
-               for a in accounts[:n_workers]]
+    threads = [
+        threading.Thread(target=worker, args=(a,), name=f"acct-{a.name}")
+        for a in accounts[:n_workers]
+    ]
     for th in threads:
         th.start()
     for th in threads:
@@ -522,7 +568,9 @@ def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
 
 
-def aggregate(results: list[dict], techniques: list[dict], cards: list[Card]) -> list[dict]:
+def aggregate(
+    results: list[dict], techniques: list[dict], cards: list[Card]
+) -> list[dict]:
     """Group per-unit results by technique; compute mean/min/max composite."""
     by_name: dict[str, list[dict]] = {}
     for r in results:
@@ -547,21 +595,23 @@ def aggregate(results: list[dict], techniques: list[dict], cards: list[Card]) ->
         facts_got = sum(u["facts"][0] for u in units if "facts" in u)
         facts_tot = sum(u["facts"][1] for u in units if "facts" in u)
 
-        rows.append({
-            "name": name,
-            "model": units[0]["model"] if units else (t.get("model")),
-            "cards": len(units),
-            "mean": _mean(comps),
-            "min": min(comps) if comps else 0.0,
-            "max": max(comps) if comps else 0.0,
-            "dumps": vcount.get("dump", 0),
-            "verdicts": vcount,
-            "per_card": {u["card"]: u["composite"] for u in units},
-            "per_card_verdict": {u["card"]: u["verdict"] for u in units},
-            "fields": fields_mean,
-            "facts": [facts_got, facts_tot] if facts_tot else None,
-            "errors": sum(1 for u in units if u.get("error")),
-        })
+        rows.append(
+            {
+                "name": name,
+                "model": units[0]["model"] if units else (t.get("model")),
+                "cards": len(units),
+                "mean": _mean(comps),
+                "min": min(comps) if comps else 0.0,
+                "max": max(comps) if comps else 0.0,
+                "dumps": vcount.get("dump", 0),
+                "verdicts": vcount,
+                "per_card": {u["card"]: u["composite"] for u in units},
+                "per_card_verdict": {u["card"]: u["verdict"] for u in units},
+                "fields": fields_mean,
+                "facts": [facts_got, facts_tot] if facts_tot else None,
+                "errors": sum(1 for u in units if u.get("error")),
+            }
+        )
     rows.sort(key=lambda r: r["mean"], reverse=True)
     return rows
 
@@ -576,16 +626,22 @@ def _verdict_blurb(vcount: dict[str, int]) -> str:
     return " ".join(f"{_VERDICT_MARK[v]}{vcount[v]}" for v in order if vcount.get(v))
 
 
-def print_scorecard(rows: list[dict], cards: list[Card], target: str, accounts: int) -> None:
+def print_scorecard(
+    rows: list[dict], cards: list[Card], target: str, accounts: int
+) -> None:
     name_w = max((len(r["name"]) for r in rows), default=9) + 1
     has_facts = any(r["facts"] for r in rows)
     show_cards = len(cards) > 1 and len(cards) <= 6
     card_names = [c.name for c in cards]
 
     print("\n=== leak scorecard (ranked by mean composite) ===")
-    print(f"target: {target}   techniques: {len(rows)}   cards: {len(cards)}   accounts: {accounts}")
+    print(
+        f"target: {target}   techniques: {len(rows)}   cards: {len(cards)}   accounts: {accounts}"
+    )
 
-    head = (f"  {'technique':<{name_w}} {'verdicts':<12} {'mean':>6} {'min':>6} {'max':>6}")
+    head = (
+        f"  {'technique':<{name_w}} {'verdicts':<12} {'mean':>6} {'min':>6} {'max':>6}"
+    )
     if show_cards:
         head += "  " + " ".join(f"{n[:8]:>8}" for n in card_names)
     if has_facts:
@@ -593,10 +649,14 @@ def print_scorecard(rows: list[dict], cards: list[Card], target: str, accounts: 
     print(head)
     print("  " + "-" * (len(head) - 2))
     for r in rows:
-        line = (f"  {r['name']:<{name_w}} {_verdict_blurb(r['verdicts']):<12}"
-                f" {r['mean']*100:5.1f}% {r['min']*100:5.1f}% {r['max']*100:5.1f}%")
+        line = (
+            f"  {r['name']:<{name_w}} {_verdict_blurb(r['verdicts']):<12}"
+            f" {r['mean'] * 100:5.1f}% {r['min'] * 100:5.1f}% {r['max'] * 100:5.1f}%"
+        )
         if show_cards:
-            line += "  " + " ".join(f"{r['per_card'].get(n, 0)*100:7.1f}%" for n in card_names)
+            line += "  " + " ".join(
+                f"{r['per_card'].get(n, 0) * 100:7.1f}%" for n in card_names
+            )
         if has_facts:
             line += f"   {r['facts'][0]}/{r['facts'][1]}" if r["facts"] else "     -"
         print(line)
@@ -605,10 +665,12 @@ def print_scorecard(rows: list[dict], cards: list[Card], target: str, accounts: 
     if top and top["fields"]:
         print(f"\n  best='{top['name']}' mean field overlap:")
         for f, v in sorted(top["fields"].items(), key=lambda kv: kv[1], reverse=True):
-            print(f"    {f:<14} {v*100:5.1f}%")
+            print(f"    {f:<14} {v * 100:5.1f}%")
 
 
-def markdown_scorecard(rows: list[dict], cards: list[Card], target: str, accounts: int) -> str:
+def markdown_scorecard(
+    rows: list[dict], cards: list[Card], target: str, accounts: int
+) -> str:
     has_facts = any(r["facts"] for r in rows)
     show_cards = len(cards) > 1 and len(cards) <= 6
     card_names = [c.name for c in cards]
@@ -631,10 +693,14 @@ def markdown_scorecard(rows: list[dict], cards: list[Card], target: str, account
     out += [header, align]
 
     for i, r in enumerate(rows, 1):
-        row = (f"| {i} | {r['name']} | {_verdict_blurb(r['verdicts'])} "
-               f"| {r['mean']*100:.1f}% | {r['min']*100:.1f}% | {r['max']*100:.1f}% |")
+        row = (
+            f"| {i} | {r['name']} | {_verdict_blurb(r['verdicts'])} "
+            f"| {r['mean'] * 100:.1f}% | {r['min'] * 100:.1f}% | {r['max'] * 100:.1f}% |"
+        )
         if show_cards:
-            row += "".join(f" {r['per_card'].get(n, 0)*100:.1f}% |" for n in card_names)
+            row += "".join(
+                f" {r['per_card'].get(n, 0) * 100:.1f}% |" for n in card_names
+            )
         if has_facts:
             row += f" {r['facts'][0]}/{r['facts'][1]} |" if r["facts"] else " - |"
         row += f" `{r['model'] or ''}` |"
@@ -645,7 +711,7 @@ def markdown_scorecard(rows: list[dict], cards: list[Card], target: str, account
         out.append(f"\n## Mean field overlap (best: `{top['name']}`)\n")
         out += ["| field | overlap |", "|---|--:|"]
         for f, v in sorted(top["fields"].items(), key=lambda kv: kv[1], reverse=True):
-            out.append(f"| {f} | {v*100:.1f}% |")
+            out.append(f"| {f} | {v * 100:.1f}% |")
 
     return "\n".join(out) + "\n"
 
@@ -658,8 +724,18 @@ def markdown_scorecard(rows: list[dict], cards: list[Card], target: str, account
 def load_suite(path: Path, cli_defaults: dict) -> tuple[dict, list[dict]]:
     """Read a suite JSON; return (shared-settings, list-of-technique-specs)."""
     cfg = json.loads(path.read_text(encoding="utf-8"))
-    keys = ("companion", "ground_truth", "config", "target", "attempts",
-            "timeout", "sleep", "probes", "cards", "accounts")
+    keys = (
+        "companion",
+        "ground_truth",
+        "config",
+        "target",
+        "attempts",
+        "timeout",
+        "sleep",
+        "probes",
+        "cards",
+        "accounts",
+    )
     shared = {k: cfg[k] for k in keys if k in cfg}
     for k, v in cli_defaults.items():
         shared.setdefault(k, v)
@@ -670,59 +746,121 @@ def load_suite(path: Path, cli_defaults: dict) -> tuple[dict, list[dict]]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Benchmark Saucepan leaks vs ground-truth cards.")
+    ap = argparse.ArgumentParser(
+        description="Benchmark Saucepan leaks vs ground-truth cards."
+    )
     ap.add_argument("--suite", type=Path, help="JSON matrix of techniques (suite mode)")
-    ap.add_argument("--accounts", type=Path, help="account database JSON (enables parallel accounts)")
-    ap.add_argument("--concurrency", type=int, default=0,
-                    help="max parallel account workers (0 = one per account)")
+    ap.add_argument(
+        "--accounts",
+        type=Path,
+        help="account database JSON (enables parallel accounts)",
+    )
+    ap.add_argument(
+        "--concurrency",
+        type=int,
+        default=0,
+        help="max parallel account workers (0 = one per account)",
+    )
     ap.add_argument("--companion", help="companion URL or id")
     ap.add_argument("--ground-truth", type=Path, help="reference chara_card_v2 JSON")
     ap.add_argument("--config", help="BYOK provider config (name or id)")
-    ap.add_argument("--model", default=None, help="override the config's model_id for the run")
+    ap.add_argument(
+        "--model", default=None, help="override the config's model_id for the run"
+    )
     ap.add_argument("--system", default=None, help="provider_prompt (system prompt)")
     ap.add_argument("--history", default=None, help="provider_post_history_prompt")
-    ap.add_argument("--prompt", default=sp.DEFAULT_LEAK_PROMPT, help="user message (single mode)")
+    ap.add_argument(
+        "--prompt", default=sp.DEFAULT_LEAK_PROMPT, help="user message (single mode)"
+    )
     ap.add_argument("--mode", choices=["user", "director"], default="user")
     ap.add_argument("--temperature", type=float, default=0.0)
-    ap.add_argument("--attempts", type=int, default=1, help="attempts per technique (best kept)")
-    ap.add_argument("--sleep", type=float, default=3.0,
-                    help="seconds between requests within an account (rate limit; default 3)")
+    ap.add_argument(
+        "--attempts", type=int, default=1, help="attempts per technique (best kept)"
+    )
+    ap.add_argument(
+        "--sleep",
+        type=float,
+        default=3.0,
+        help="seconds between requests within an account (rate limit; default 3)",
+    )
     ap.add_argument("--timeout", type=int, default=150)
     ap.add_argument("--target", choices=["description", "full"], default="description")
-    ap.add_argument("--decode", default="", help="comma-separated: base64,hex,zwsp,pipe,leet,reverse,rot13")
-    ap.add_argument("--probes", default=None, help="comma-separated distinctive phrases (facts metric)")
-    ap.add_argument("--filter", default=None, dest="name_filter",
-                    help="glob pattern to select techniques by name (e.g. 'base*')")
-    ap.add_argument("--tag", default=None, help="only run techniques with this tag (suite mode)")
-    ap.add_argument("--dry-run", action="store_true", help="validate config and list the run without executing")
-    ap.add_argument("--save", type=Path, default=None, help="single mode: write the raw leaked text here")
-    ap.add_argument("--json", type=Path, default=None, help="write full results as JSON")
+    ap.add_argument(
+        "--decode",
+        default="",
+        help="comma-separated: base64,hex,zwsp,pipe,leet,reverse,rot13",
+    )
+    ap.add_argument(
+        "--probes",
+        default=None,
+        help="comma-separated distinctive phrases (facts metric)",
+    )
+    ap.add_argument(
+        "--filter",
+        default=None,
+        dest="name_filter",
+        help="glob pattern to select techniques by name (e.g. 'base*')",
+    )
+    ap.add_argument(
+        "--tag", default=None, help="only run techniques with this tag (suite mode)"
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="validate config and list the run without executing",
+    )
+    ap.add_argument(
+        "--save",
+        type=Path,
+        default=None,
+        help="single mode: write the raw leaked text here",
+    )
+    ap.add_argument(
+        "--json", type=Path, default=None, help="write full results as JSON"
+    )
     ap.add_argument("--md", type=Path, default=None, help="write a Markdown scorecard")
-    ap.add_argument("--no-restore", action="store_true", help="leave configs modified after the run")
+    ap.add_argument(
+        "--no-restore", action="store_true", help="leave configs modified after the run"
+    )
     args = ap.parse_args()
 
     log = lambda m: print(m, file=sys.stderr)  # noqa: E731
 
     # --- assemble the technique list (single mode = a one-item suite) ------- #
     cli_defaults = {
-        "companion": args.companion, "ground_truth": str(args.ground_truth) if args.ground_truth else None,
-        "config": args.config, "target": args.target, "attempts": args.attempts,
-        "timeout": args.timeout, "sleep": args.sleep,
+        "companion": args.companion,
+        "ground_truth": str(args.ground_truth) if args.ground_truth else None,
+        "config": args.config,
+        "target": args.target,
+        "attempts": args.attempts,
+        "timeout": args.timeout,
+        "sleep": args.sleep,
         "probes": [p.strip() for p in args.probes.split(",")] if args.probes else None,
     }
     if args.suite:
         shared, techniques = load_suite(args.suite, cli_defaults)
     else:
         shared = cli_defaults
-        techniques = [{
-            "name": "single", "system": args.system, "history": args.history,
-            "prompt": args.prompt, "model": args.model, "mode": args.mode,
-            "temperature": args.temperature, "decode": [d.strip() for d in args.decode.split(",") if d.strip()],
-        }]
+        techniques = [
+            {
+                "name": "single",
+                "system": args.system,
+                "history": args.history,
+                "prompt": args.prompt,
+                "model": args.model,
+                "mode": args.mode,
+                "temperature": args.temperature,
+                "decode": [d.strip() for d in args.decode.split(",") if d.strip()],
+            }
+        ]
 
     # --- filter techniques -------------------------------------------------- #
     if args.name_filter:
-        techniques = [t for t in techniques if fnmatch.fnmatch(t.get("name", ""), args.name_filter)]
+        techniques = [
+            t
+            for t in techniques
+            if fnmatch.fnmatch(t.get("name", ""), args.name_filter)
+        ]
         if not techniques:
             print(f"no techniques match filter {args.name_filter!r}", file=sys.stderr)
             return 1
@@ -754,17 +892,25 @@ def main() -> int:
                 accounts = load_accounts(accounts_src, shared.get("config"), log)
             else:
                 # accounts inlined in the suite; nothing to persist back
-                accounts = load_accounts_from_obj({"accounts": inline_accounts}, shared.get("config"), log)
+                accounts = load_accounts_from_obj(
+                    {"accounts": inline_accounts}, shared.get("config"), log
+                )
         except (ValueError, OSError, sp.SaucepanError, json.JSONDecodeError) as exc:
             print(f"accounts error: {exc}", file=sys.stderr)
             return 1
     else:
         # Single implicit account backed by the global token (original behaviour).
         if not sp.has_token():
-            print("no Saucepan token — run `rip saucepan login` first, or pass --accounts", file=sys.stderr)
+            print(
+                "no Saucepan token — run `rip saucepan login` first, or pass --accounts",
+                file=sys.stderr,
+            )
             return 1
         if not shared.get("config"):
-            print("missing required setting: config (via --config or the suite file)", file=sys.stderr)
+            print(
+                "missing required setting: config (via --config or the suite file)",
+                file=sys.stderr,
+            )
             return 1
         accounts = [Account("default", None, None, sp.load_token(), shared["config"])]
 
@@ -773,25 +919,35 @@ def main() -> int:
     # --- dry run ------------------------------------------------------------ #
     if args.dry_run:
         total = len(techniques) * len(cards)
-        print(f"=== dry run: {total} unit(s) = {len(techniques)} technique(s) × {len(cards)} card(s) ===")
-        print(f"accounts  : {len(accounts)}  ({', '.join(a.name for a in accounts)})  "
-              f"workers={min(concurrency, len(accounts))}")
+        print(
+            f"=== dry run: {total} unit(s) = {len(techniques)} technique(s) × {len(cards)} card(s) ==="
+        )
+        print(
+            f"accounts  : {len(accounts)}  ({', '.join(a.name for a in accounts)})  "
+            f"workers={min(concurrency, len(accounts))}"
+        )
         print(f"target    : {target_kind}")
         print("cards:")
         for c in cards:
-            print(f"  - {c.name:<20} companion={c.companion}  target={c.target_kind} ({len(c.target)} chars)"
-                  f"  probes={len(c.probes or [])}")
+            print(
+                f"  - {c.name:<20} companion={c.companion}  target={c.target_kind} ({len(c.target)} chars)"
+                f"  probes={len(c.probes or [])}"
+            )
         print("techniques:")
         for i, t in enumerate(techniques, 1):
             tags = ", ".join(t.get("tags") or []) or "-"
             decode = ",".join(t.get("decode") or []) or "-"
-            print(f"  {i:>2}. {t.get('name', 'unnamed'):<25} model={t.get('model') or '(config)'}"
-                  f"  mode={t.get('mode', 'user')}  decode={decode}  tags={tags}")
+            print(
+                f"  {i:>2}. {t.get('name', 'unnamed'):<25} model={t.get('model') or '(config)'}"
+                f"  mode={t.get('mode', 'user')}  decode={decode}  tags={tags}"
+            )
         return 0
 
     # --- run ---------------------------------------------------------------- #
     sleep = float(shared.get("sleep", 3.0))
-    results = run_matrix(techniques, cards, accounts, sleep, concurrency, args.no_restore, log)
+    results = run_matrix(
+        techniques, cards, accounts, sleep, concurrency, args.no_restore, log
+    )
     rows = aggregate(results, techniques, cards)
 
     # --- output ------------------------------------------------------------- #
@@ -804,21 +960,28 @@ def main() -> int:
         s = r["scores"]
         print("\n=== leak bench ===")
         print(f"model    : {r['model']}  (config {accounts[0].config})")
-        print(f"verdict  : {_VERDICT_MARK.get(r['verdict'], '?')} {r['verdict']}"
-              + (f"  (error: {r['error']})" if r["error"] else ""))
-        print(f"output   : {r['chars']} chars" + (f"  -> {args.save}" if args.save else ""))
+        print(
+            f"verdict  : {_VERDICT_MARK.get(r['verdict'], '?')} {r['verdict']}"
+            + (f"  (error: {r['error']})" if r["error"] else "")
+        )
+        print(
+            f"output   : {r['chars']} chars"
+            + (f"  -> {args.save}" if args.save else "")
+        )
         print(f"target   : {target_kind} ({len(cards[0].target)} chars)")
         print("-- scores --")
-        print(f"  composite: {r['composite']*100:5.1f}%")
-        print(f"  overlap  : {s['overlap']*100:5.1f}%   (8-gram verbatim proxy)")
-        print(f"  lines    : {s['lines']*100:5.1f}%   (substantial lines reproduced)")
-        print(f"  words    : {s['words']*100:5.1f}%   (distinctive-word recall)")
+        print(f"  composite: {r['composite'] * 100:5.1f}%")
+        print(f"  overlap  : {s['overlap'] * 100:5.1f}%   (8-gram verbatim proxy)")
+        print(f"  lines    : {s['lines'] * 100:5.1f}%   (substantial lines reproduced)")
+        print(f"  words    : {s['words'] * 100:5.1f}%   (distinctive-word recall)")
         if "facts" in r:
-            print(f"  facts    : {r['facts'][0]}/{r['facts'][1]}   (distinctive phrases present)")
+            print(
+                f"  facts    : {r['facts'][0]}/{r['facts'][1]}   (distinctive phrases present)"
+            )
         if r["fields"]:
             print("-- field overlap --")
             for f, v in sorted(r["fields"].items(), key=lambda kv: kv[1], reverse=True):
-                print(f"  {f:<14} {v*100:5.1f}%")
+                print(f"  {f:<14} {v * 100:5.1f}%")
         print("-- preview --")
         print(r["raw"][:300])
     else:
@@ -835,7 +998,10 @@ def main() -> int:
         args.json.write_text(json.dumps(dump, indent=2), encoding="utf-8")
         print(f"\nwrote {args.json}", file=sys.stderr)
     if args.md:
-        args.md.write_text(markdown_scorecard(rows, cards, target_kind, len(accounts)), encoding="utf-8")
+        args.md.write_text(
+            markdown_scorecard(rows, cards, target_kind, len(accounts)),
+            encoding="utf-8",
+        )
         print(f"wrote {args.md}", file=sys.stderr)
 
     # Non-zero exit if nothing produced a real dump (useful in CI/scripts).
@@ -845,7 +1011,9 @@ def main() -> int:
 def load_accounts_from_obj(obj: dict, default_config: str | None, log) -> list[Account]:
     """Like ``load_accounts`` but from an already-parsed object (no write-back)."""
     entries = obj.get("accounts") if isinstance(obj, dict) else obj
-    accounts, _dirty = _accounts_from_entries(entries, default_config, log, cache_back=False)
+    accounts, _dirty = _accounts_from_entries(
+        entries, default_config, log, cache_back=False
+    )
     return accounts
 
 
