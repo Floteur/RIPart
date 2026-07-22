@@ -713,9 +713,13 @@ class ForumPublisher:
                     "inline": True,
                 }
             )
+        description = str(record.get("description") or "").strip()
+        if len(description) > _EMBED_DESCRIPTION_CAP:
+            description = description[: _EMBED_DESCRIPTION_CAP - 1].rstrip() + "…"
         embed = {
             "title": title[:_EMBED_TITLE_CAP],
-            "description": "Latest extracted lorebook record is attached as JSON.",
+            "description": description
+            or "Latest extracted lorebook record is attached as JSON.",
             "fields": fields,
             "footer": {"text": "ripart lorebook archive"},
         }
@@ -816,10 +820,17 @@ def publish_saved_card(
 def publish_lorebooks(lorebook_paths: list[str]) -> list[dict[str, Any]]:
     """Best-effort upsert of changed library lorebooks to their dedicated forum.
 
-    ``update_lorebook_library`` returns both provider-lorebook records and
-    private/unassigned observation records.  Both are useful extraction evidence,
-    so each gets a stable thread and every later retrieval becomes a new reply.
+    ``update_lorebook_library`` also returns private ``unassigned/`` observation
+    records used for local reconciliation. Those are audit evidence, not actual
+    lorebooks, and must never create Discord lorebook threads.
     """
+    publishable_paths = [
+        Path(raw_path)
+        for raw_path in lorebook_paths
+        if Path(raw_path).parent.name != "unassigned"
+    ]
+    if not publishable_paths:
+        return []
     publisher = _lorebook_publisher_from_env()
     if publisher is None:
         return []
@@ -828,17 +839,11 @@ def publish_lorebooks(lorebook_paths: list[str]) -> list[dict[str, Any]]:
         shared = publisher.lorebook_thread_index()
     except Exception as exc:  # noqa: BLE001 - preserve extraction on Discord failure
         return [{"action": "error", "error": str(exc)}]
-    for raw_path in lorebook_paths:
-        path = Path(raw_path)
+    for path in publishable_paths:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(record, dict):
                 raise ValueError("lorebook record is not a JSON object")
-            if _is_fully_attributed_observation_record(path, record):
-                # The corresponding provider record already contains these
-                # recovered observations. Publishing this local audit file too
-                # would create a misleading second thread for one lorebook.
-                continue
             source = str(record.get("source") or path.parent.name or "unknown")
             source_id = str(record.get("sourceLorebookId") or "").strip()
             key = f"{source}:{source_id or path.stem}"
@@ -856,30 +861,6 @@ def publish_lorebooks(lorebook_paths: list[str]) -> list[dict[str, Any]]:
         except Exception as exc:  # noqa: BLE001 - continue through changed records
             outcomes.append({"action": "error", "path": str(path), "error": str(exc)})
     return outcomes
-
-
-def _is_fully_attributed_observation_record(path: Path, record: dict[str, Any]) -> bool:
-    """Whether an unassigned audit file is wholly represented by a book record."""
-    if path.parent.name != "unassigned":
-        return False
-    observations = record.get("observations")
-    if not isinstance(observations, list) or not observations:
-        return False
-    for observation in observations:
-        attribution = (
-            observation.get("attribution") if isinstance(observation, dict) else None
-        )
-        candidates = (
-            attribution.get("candidates") if isinstance(attribution, dict) else None
-        )
-        if not (
-            isinstance(attribution, dict)
-            and attribution.get("status") == "inferred"
-            and isinstance(candidates, list)
-            and len(candidates) == 1
-        ):
-            return False
-    return True
 
 
 def _safe_filename(value: str) -> str:

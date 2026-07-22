@@ -154,7 +154,7 @@ def test_publish_lorebooks_uses_the_dedicated_publisher(monkeypatch, tmp_path):
     assert captured["filename"] == "janitor-book-42.json"
 
 
-def test_publish_lorebooks_does_not_duplicate_fully_attributed_observations(
+def test_publish_lorebooks_never_publishes_unassigned_observations(
     monkeypatch, tmp_path
 ):
     record_path = tmp_path / "lorebooks" / "janitor" / "unassigned" / "character.json"
@@ -166,8 +166,8 @@ def test_publish_lorebooks_does_not_duplicate_fully_attributed_observations(
                 "observations": [
                     {
                         "attribution": {
-                            "status": "inferred",
-                            "candidates": ["book-42"],
+                            "status": "unassigned",
+                            "candidates": ["book-42", "book-99"],
                         }
                     }
                 ],
@@ -176,18 +176,46 @@ def test_publish_lorebooks_does_not_duplicate_fully_attributed_observations(
         encoding="utf-8",
     )
 
-    class LorebookPublisher:
-        def lorebook_thread_index(self):
-            return {}
-
-        def upsert_lorebook(self, **_kwargs):
-            raise AssertionError("fully attributed audit file must not be published")
-
     monkeypatch.setattr(
-        discord_forum, "_lorebook_publisher_from_env", lambda: LorebookPublisher()
+        discord_forum,
+        "_lorebook_publisher_from_env",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("unassigned audit files must not contact Discord")
+        ),
     )
 
     assert discord_forum.publish_lorebooks([str(record_path)]) == []
+
+
+def test_lorebook_thread_embed_uses_saved_api_description():
+    publisher = object.__new__(ForumPublisher)
+    publisher.on_duplicate = "repost"
+    publisher.lorebook_thread_index = lambda: {}
+    captured: dict = {}
+
+    def create_file_post(**kwargs):
+        captured.update(kwargs)
+        return {"id": "thread-id"}
+
+    publisher.create_file_post = create_file_post
+
+    outcome = publisher.upsert_lorebook(
+        key="janitor:book-42",
+        title="janitor: Shared book",
+        record={
+            "source": "janitor",
+            "sourceLorebookId": "book-42",
+            "title": "Shared book",
+            "description": "Description fetched from Janitor's API.",
+            "entryCount": 3,
+        },
+        filename="janitor-book-42.json",
+    )
+
+    assert outcome["action"] == "create"
+    assert captured["embed"]["description"] == (
+        "Description fetched from Janitor's API."
+    )
 
 
 def test_upsert_creates_a_thread_with_the_rich_embed(tmp_path):

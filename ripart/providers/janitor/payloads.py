@@ -263,15 +263,19 @@ def build_trigger_search_messages(entries: list[str]) -> list[tuple[str, str]]:
             ):
                 candidates.append(heading)
         # Proper names and distinctive words cover entries without a useful
-        # heading.  Keep this deliberately short: a broad sweep wastes probes
-        # on generic vocabulary before other recovered entries are tested.
+        # heading.  The round-robin merge below preserves fairness between
+        # entries, so retain enough words to use the configured probe budget
+        # and reach keys that occur beyond an entry's opening sentence.
         for phrase in re.findall(r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*)+\b", text):
             candidates.append(phrase)
         words: list[str] = []
+        seen_words: set[str] = set()
         for word in re.findall(r"[A-Za-z][A-Za-z'-]{3,}", text):
-            if word.lower() not in ENGLISH_STOPWORDS:
+            word_key = word.lower()
+            if word_key not in ENGLISH_STOPWORDS and word_key not in seen_words:
+                seen_words.add(word_key)
                 words.append(word)
-        candidates.extend(words[:3])
+        candidates.extend(words[:8])
 
         group: list[str] = []
         seen_group: set[str] = set()

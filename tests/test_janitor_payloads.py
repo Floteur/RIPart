@@ -116,3 +116,16 @@ def test_trigger_search_messages_are_distributed_across_entries():
         "FIRST RULE",
         "SECOND RULE",
     ]
+
+
+def test_trigger_search_messages_reach_later_distinctive_words():
+    probes = build_trigger_search_messages(
+        [
+            "alpha bravo charlie delta echo foxtrot golf hiddenkey "
+            "ninthword"
+        ]
+    )
+
+    candidates = [candidate.lower() for candidate, _message in probes]
+    assert "hiddenkey" in candidates
+    assert "ninthword" not in candidates

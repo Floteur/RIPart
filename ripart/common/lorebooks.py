@@ -161,6 +161,7 @@ def _write_unassigned_observations(
     result: dict[str, Any],
     now: str,
     attached_lorebook_ids: list[str],
+    attribution_lorebook_ids: list[str] | None = None,
 ) -> str | None:
     """Persist private blocks and cross-character attribution evidence.
 
@@ -186,7 +187,16 @@ def _write_unassigned_observations(
         / f"{_safe_component(character_id)}.json"
     )
     trigger_map = result.get("recoveredTriggers") or {}
-    candidate_ids = sorted(set(attached_lorebook_ids))
+    recovered_constant_keys = {
+        norm(value) for value in result.get("recoveredConstants") or []
+    }
+    # Readable provider entries are removed before generateAlpha residue is
+    # separated.  When one or more attached books are closed, only those books
+    # can own the recovered blocks; retaining readable books as candidates
+    # prevents an otherwise unambiguous private dump from ever being promoted.
+    candidate_ids = sorted(
+        set(attribution_lorebook_ids or attached_lorebook_ids)
+    )
     evidence_file = _evidence_path(library_dir, source)
     try:
         evidence = json.loads(evidence_file.read_text(encoding="utf-8"))
@@ -209,11 +219,16 @@ def _write_unassigned_observations(
             "candidateLorebookIds": candidate_ids,
             "seenAt": now,
         }
-        if not any(
-            isinstance(old, dict) and old.get("characterId") == character_id
+        # Replace this character's prior sighting.  A newer extractor may have
+        # stronger attachment visibility (for example, it can now distinguish
+        # one closed book from one readable book), and stale broad candidates
+        # must not permanently block attribution.
+        sightings = [
+            old
             for old in sightings
-        ):
-            sightings.append(sighting)
+            if not (isinstance(old, dict) and old.get("characterId") == character_id)
+        ]
+        sightings.append(sighting)
         sets = [
             set(old.get("candidateLorebookIds") or [])
             for old in sightings
@@ -240,6 +255,9 @@ def _write_unassigned_observations(
         }
         if triggers:
             observation["inferredTriggers"] = triggers
+        always_active = norm(content) in recovered_constant_keys
+        if always_active:
+            observation["alwaysActive"] = True
         new_observations.append(observation)
         if status == "inferred":
             assigned.setdefault(candidates[0], []).append(observation)
@@ -328,15 +346,54 @@ def _write_unassigned_observations(
             continue
         recovered = record.get("recoveredObservations")
         recovered = recovered if isinstance(recovered, list) else []
-        known = {
-            str(item.get("contentFingerprint") or "")
-            for item in recovered
-            if isinstance(item, dict)
+        positions = {
+            str(item.get("contentFingerprint") or ""): index
+            for index, item in enumerate(recovered)
+            if isinstance(item, dict) and item.get("contentFingerprint")
         }
-        recovered.extend(
-            item for item in items if item["contentFingerprint"] not in known
-        )
+        for item in items:
+            fingerprint = item["contentFingerprint"]
+            if fingerprint in positions:
+                recovered[positions[fingerprint]] = item
+            else:
+                positions[fingerprint] = len(recovered)
+                recovered.append(item)
         record["recoveredObservations"] = recovered
+        recovered_entries: dict[str, dict[str, Any]] = {}
+        for index, observation in enumerate(recovered):
+            if not isinstance(observation, dict):
+                continue
+            content = str(observation.get("content") or "").strip()
+            if not content:
+                continue
+            triggers = [
+                str(value).strip()
+                for value in observation.get("inferredTriggers") or []
+                if str(value).strip()
+            ]
+            recovered_entries[str(index)] = {
+                "uid": index,
+                "content": content,
+                "key": triggers,
+                "constant": bool(observation.get("alwaysActive")),
+                "disable": not (observation.get("alwaysActive") or triggers),
+                "comment": "Recovered from Janitor generateAlpha",
+                "extensions": {
+                    "ripart": {
+                        "recovered": True,
+                        "activation": (
+                            "always"
+                            if observation.get("alwaysActive")
+                            else "inferred-keys"
+                            if triggers
+                            else "unknown"
+                        ),
+                        "contentFingerprint": observation.get("contentFingerprint"),
+                    }
+                },
+            }
+        record["recoveredWorldInfo"] = {"entries": recovered_entries}
+        record["recoveredEntryCount"] = len(recovered_entries)
         record["updatedAt"] = now
         write_json(record_file, record)
     return str(path)
@@ -359,6 +416,7 @@ def update_lorebook_library(
     )
     written: list[str] = []
     attached_lorebook_ids: list[str] = []
+    inaccessible_lorebook_ids: list[str] = []
     for book in result.get("publicLorebooks") or []:
         if not isinstance(book, dict):
             continue
@@ -370,6 +428,11 @@ def update_lorebook_library(
         # text from multiple characters can later be attributed to it.
         if source_id:
             attached_lorebook_ids.append(source_id)
+            is_code_public = book.get("isCodePublic")
+            if is_code_public is False or (
+                is_code_public is None and not book.get("accessible")
+            ):
+                inaccessible_lorebook_ids.append(source_id)
         if not entries and not source_id:
             continue
         fingerprint = _fingerprint(book, entries)
@@ -399,12 +462,16 @@ def update_lorebook_library(
         recovered_observations = (
             recovered_observations if isinstance(recovered_observations, list) else []
         )
+        description = str(book.get("description") or "").strip()
+        if not description and isinstance(existing, dict):
+            description = str(existing.get("description") or "").strip()
         record = {
             "schemaVersion": 1,
             "source": source,
             "sourceLorebookId": source_id,
             "contentFingerprint": fingerprint,
             "title": title,
+            "description": description,
             "worldInfo": {"entries": entries},
             "entryCount": len(entries),
             "accessible": bool(book.get("accessible")),
@@ -429,6 +496,7 @@ def update_lorebook_library(
         result,
         now,
         attached_lorebook_ids,
+        inaccessible_lorebook_ids or attached_lorebook_ids,
     )
     if unassigned_path:
         written.append(unassigned_path)

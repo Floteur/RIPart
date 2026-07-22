@@ -7,6 +7,7 @@ thin wrapper over these.
 """
 
 import difflib
+import hashlib
 import json
 import os
 import time
@@ -787,6 +788,135 @@ def _public_entry_contents(books: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+def _public_lorebook_count(books: list[dict[str, Any]]) -> int:
+    """Count attached lorebooks whose contents Janitor marks as public.
+
+    ``is_public`` controls whether Janitor lists the lorebook itself, while
+    ``is_code_public`` controls whether other users can read its entries.  The
+    fetch result intentionally retains closed attachments for trigger recovery,
+    so counting the result list would incorrectly label those books as public.
+    """
+    return sum(book.get("isCodePublic") is True for book in books)
+
+
+def _public_entry_count(books: list[dict[str, Any]]) -> int:
+    """Count readable entries belonging to genuinely public lorebooks."""
+    public_books = [book for book in books if book.get("isCodePublic") is True]
+    return len(_public_entry_contents(public_books))
+
+
+def _trigger_search_matches(
+    found_entries: list[str],
+    recovered_entries: list[str],
+    constant_entries: set[str],
+) -> set[str]:
+    """Return candidate-triggered entry keys, excluding baseline constants."""
+    searchable_keys = {
+        key
+        for entry in recovered_entries
+        if (key := _norm(entry)) and key not in constant_entries
+    }
+    found_keys = {_norm(entry) for entry in found_entries if _norm(entry)}
+    return searchable_keys & found_keys
+
+
+def _bounded_debug_text(value: str, limit: int = 72) -> str:
+    """Return a quoted, single-line, strictly bounded semantic preview."""
+    text = " ".join(str(value or "").split())
+    if len(text) > limit:
+        omitted = len(text) - limit
+        text = f"{text[:limit]}…(+{omitted})"
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _trigger_search_debug_summary(
+    candidate: str,
+    found_entries: list[str],
+    recovered_entries: list[str],
+    constant_entries: set[str],
+) -> str:
+    """Build a bounded semantic trace for one trigger-search probe."""
+    recovered_by_key = {
+        key: entry
+        for entry in recovered_entries
+        if (key := _norm(entry))
+    }
+    recovered_keys = set(recovered_by_key)
+    found_keys = {_norm(entry) for entry in found_entries if _norm(entry)}
+    matched_keys = (recovered_keys - constant_entries) & found_keys
+    baseline_hits = constant_entries & found_keys
+    missing_baseline = constant_entries - found_keys
+    unexpected = found_keys - recovered_keys
+    entry_refs = []
+    for key in sorted(matched_keys)[:4]:
+        fingerprint = hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+        entry_refs.append(
+            f"{fingerprint}:{_bounded_debug_text(recovered_by_key[key], 56)}"
+        )
+    if len(matched_keys) > 4:
+        entry_refs.append(f"+{len(matched_keys) - 4} more")
+    return (
+        f"candidate={_bounded_debug_text(candidate)} found={len(found_keys)} "
+        f"baseline={len(baseline_hits)}/{len(constant_entries)} "
+        f"matched={len(matched_keys)} missing_baseline={len(missing_baseline)} "
+        f"unexpected={len(unexpected)} entries=[{', '.join(entry_refs)}]"
+    )
+
+
+def _trigger_activation_groups(
+    recovered_triggers: dict[str, list[str]],
+) -> list[dict[str, Any]]:
+    """Group entries that exhibited the same inferred activation behavior."""
+    groups: dict[tuple[str, ...], list[str]] = {}
+    for entry_key, triggers in recovered_triggers.items():
+        trigger_set = tuple(sorted(set(triggers), key=lambda value: value.casefold()))
+        if trigger_set:
+            groups.setdefault(trigger_set, []).append(entry_key)
+    return [
+        {"triggers": list(triggers), "entries": sorted(entries)}
+        for triggers, entries in sorted(
+            groups.items(), key=lambda item: (-len(item[1]), item[0])
+        )
+    ]
+
+
+def _trigger_activation_groups_summary(
+    recovered_triggers: dict[str, list[str]],
+) -> list[str]:
+    """Return bounded debug summaries for inferred activation groups."""
+    summaries: list[str] = []
+    for index, group in enumerate(_trigger_activation_groups(recovered_triggers), 1):
+        fingerprints = [
+            hashlib.sha256(entry.encode("utf-8")).hexdigest()[:8]
+            for entry in group["entries"]
+        ]
+        trigger_preview = ", ".join(
+            _bounded_debug_text(trigger, 40) for trigger in group["triggers"][:8]
+        )
+        if len(group["triggers"]) > 8:
+            trigger_preview += f", +{len(group['triggers']) - 8} more"
+        summaries.append(
+            f"activation group {index}: entries={len(group['entries'])} "
+            f"fingerprints=[{', '.join(fingerprints)}] "
+            f"triggers=[{trigger_preview}]"
+        )
+    return summaries
+
+
+def _trigger_search_plateau_reached(
+    searchable_entries: list[str],
+    recovered_triggers: dict[str, list[str]],
+    consecutive_misses: int,
+    miss_limit: int,
+) -> bool:
+    """Stop only after every searchable entry has evidence and hits plateau."""
+    if miss_limit <= 0 or consecutive_misses < miss_limit:
+        return False
+    searchable_keys = {_norm(entry) for entry in searchable_entries if _norm(entry)}
+    matched_keys = {key for key, triggers in recovered_triggers.items() if triggers}
+    return bool(searchable_keys) and searchable_keys <= matched_keys
+
+
 def _fetch_public_lorebooks(
     driver, meta: dict[str, Any] | None
 ) -> list[dict[str, Any]]:
@@ -867,21 +997,58 @@ def _delete_chat(driver, chat_id: str) -> bool:
 def _extract_log(message: str, *, verbose: int = 0, level: int = 1) -> None:
     """Print ``message`` when the run's ``-v`` count meets ``level``.
 
-    Levels: 1 = progress (chat/persona/trigger-pass narration; the classic
-    ``--verbose``), 2 = wire summaries (one line per generateAlpha call: status
-    + timing), 3 = raw payload previews (truncated request/response bodies).
-    Every call site threads ``verbose`` through, so a plain ``rip extract``
+    Levels: 1 = extraction decisions and progress, 2 = one status/timing line
+    per generateAlpha call, 3 = compact request/response shape metadata on the
+    same line, 4 = bounded semantic trigger-search traces. Levels 1-3 never log
+    prompt, card, lorebook, or model-response text. A plain ``rip extract``
     (verbose=0) stays quiet.
     """
     if verbose >= level:
         print(f"[extract] {message}", flush=True)
 
 
-def _trace_preview(value: Any, limit: int = 800) -> str:
-    """One-line, length-capped rendering of a JS payload for -vvv tracing."""
-    text = value if isinstance(value, str) else json.dumps(value, default=str)
-    text = " ".join(text.split())
-    return text if len(text) <= limit else f"{text[:limit]}… ({len(text)} chars total)"
+def _generate_request_summary(body: dict[str, Any]) -> str:
+    """Describe a generateAlpha request without exposing any request text."""
+    messages = body.get("chatMessages")
+    messages = messages if isinstance(messages, list) else []
+    message_chars = [
+        len(item.get("message"))
+        if isinstance(item, dict) and isinstance(item.get("message"), str)
+        else 0
+        for item in messages
+    ]
+    user_config = body.get("userConfig")
+    user_config = user_config if isinstance(user_config, dict) else {}
+    generation = user_config.get("generation_settings")
+    generation = generation if isinstance(generation, dict) else {}
+    api = str(user_config.get("api") or "?")
+    mode = str(user_config.get("open_ai_mode") or "?")
+    max_tokens = generation.get("max_new_token")
+    return (
+        f"messages={len(messages)} chars={sum(message_chars)} "
+        f"last={message_chars[-1] if message_chars else 0} "
+        f"api={api}/{mode} max_tokens={max_tokens if max_tokens is not None else '?'} "
+        f"persona={'yes' if body.get('personas') else 'no'}"
+    )
+
+
+def _generate_response_summary(payload: dict[str, Any]) -> str:
+    """Describe a parsed generateAlpha response without exposing its content."""
+    messages = payload.get("messages")
+    messages = messages if isinstance(messages, list) else []
+    content_chars = [
+        len(item.get("content"))
+        if isinstance(item, dict) and isinstance(item.get("content"), str)
+        else 0
+        for item in messages
+    ]
+    displayed_parts: list[Any] = content_chars[:8]
+    if len(content_chars) > 8:
+        displayed_parts.append(f"+{len(content_chars) - 8} more")
+    return (
+        f"messages={len(messages)} content_chars={sum(content_chars)} "
+        f"parts={displayed_parts} max_tokens={payload.get('max_tokens', '?')}"
+    )
 
 
 def _get_profile(driver) -> dict[str, Any]:
@@ -1185,7 +1352,9 @@ class GenerateAlphaError(RuntimeError):
 
     def __init__(self, status: int, body: str) -> None:
         self.status = status
-        super().__init__(f"generateAlpha failed: HTTP {status} {(body or '')[:300]}")
+        super().__init__(
+            f"generateAlpha failed: HTTP {status} response_bytes={len(body or '')}"
+        )
 
 
 def _post_generate_alpha(
@@ -1474,6 +1643,8 @@ def _leak_definition_via_janitor(
     passes: int,
     pacer: "_Pacer",
     clog,
+    detailed: bool = False,
+    stats: dict[str, int | float] | None = None,
 ) -> str:
     """Make JanitorLLM dump the character definition, over N passes, medoid-picked.
 
@@ -1493,27 +1664,42 @@ def _leak_definition_via_janitor(
             profile, chat_id, character_id, messages, persona, user_config=user_config
         )
         pacer.wait()
-        clog(
-            f"leak pass {attempt + 1}/{passes} request: {_trace_preview(body)}", level=3
-        )
         started = time.monotonic()
         result = _post_generate_alpha(driver, body, chat_id)
         elapsed_ms = (time.monotonic() - started) * 1000
         status = int(result.get("status") or 0)
-        clog(
-            f"leak pass {attempt + 1}/{passes} generateAlpha -> {status} ({elapsed_ms:.0f}ms)",
-            level=2,
+        if stats is not None:
+            stats["attempts"] += 1
+            stats["elapsedMs"] += elapsed_ms
+        request_detail = (
+            f" request[{_generate_request_summary(body)}]" if detailed else ""
         )
         if status >= 400:
+            clog(
+                f"leak pass {attempt + 1}/{passes} generateAlpha {status} "
+                f"({elapsed_ms:.0f}ms){request_detail}",
+                level=2,
+            )
             if status == 429:
                 pacer.on_rate_limit()
+                if stats is not None:
+                    stats["rateLimits"] += 1
             clog(f"warning: leak pass {attempt + 1}/{passes} HTTP {status}")
             continue
         pacer.on_success()
+        if stats is not None:
+            stats["succeeded"] += 1
         text = _parse_janitor_completion(result.get("body") or "")
+        output_detail = (
+            f" response[content_chars={len(text)} "
+            f"stream_bytes={len(result.get('body') or '')}]"
+            if detailed
+            else ""
+        )
         clog(
-            f"leak pass {attempt + 1}/{passes} response: {_trace_preview(result.get('body') or '')}",
-            level=3,
+            f"leak pass {attempt + 1}/{passes} generateAlpha {status} "
+            f"({elapsed_ms:.0f}ms){request_detail}{output_detail}",
+            level=2,
         )
         if text.strip():
             dumps.append(text)
@@ -1567,6 +1753,7 @@ def _extract_character(
     max_trigger_passes: int,
     find_triggers: bool,
     max_trigger_search_passes: int,
+    trigger_search_miss_limit: int,
     settle: float,
     delete_chat_on_error: bool,
     verbose: int,
@@ -1592,6 +1779,12 @@ def _extract_character(
     base_messages: list[dict[str, Any]] = []
     if pacer is None:
         pacer = _Pacer(floor=settle)
+    generation_stats: dict[str, int | float] = {
+        "attempts": 0,
+        "succeeded": 0,
+        "rateLimits": 0,
+        "elapsedMs": 0.0,
+    }
 
     def _clog(message: str, *, level: int = 1) -> None:
         _extract_log(f"[{character_id}] {message}", verbose=verbose, level=level)
@@ -1601,25 +1794,38 @@ def _extract_character(
         body = _build_generate_alpha_body(
             profile, chat_id, character_id, messages, persona
         )
-        if verbose >= 3:
-            _clog(f"{label} request: {_trace_preview(body)}", level=3)
+        request_detail = (
+            f" request[{_generate_request_summary(body)}]" if verbose >= 3 else ""
+        )
         last_exc: Exception | None = None
         backoff = 2.0
         for attempt in range(GENERATE_MAX_ATTEMPTS):
             pacer.wait()  # adaptive: no-op on healthy runs, spaces calls after a 429
+            generation_stats["attempts"] += 1
             started = time.monotonic()
             try:
                 payload = _call_generate_alpha(driver, body, chat_id)
                 elapsed_ms = (time.monotonic() - started) * 1000
-                _clog(f"{label} generateAlpha ok ({elapsed_ms:.0f}ms)", level=2)
-                if verbose >= 3:
-                    _clog(f"{label} response: {_trace_preview(payload)}", level=3)
+                generation_stats["succeeded"] += 1
+                generation_stats["elapsedMs"] += elapsed_ms
+                response_detail = (
+                    f" response[{_generate_response_summary(payload)}]"
+                    if verbose >= 3
+                    else ""
+                )
+                _clog(
+                    f"{label} generateAlpha 200 ({elapsed_ms:.0f}ms)"
+                    f"{request_detail}{response_detail}",
+                    level=2,
+                )
                 pacer.on_success()
                 return payload
             except GenerateAlphaError as exc:
                 elapsed_ms = (time.monotonic() - started) * 1000
+                generation_stats["elapsedMs"] += elapsed_ms
                 _clog(
-                    f"{label} generateAlpha HTTP {exc.status} ({elapsed_ms:.0f}ms)",
+                    f"{label} generateAlpha {exc.status} ({elapsed_ms:.0f}ms)"
+                    f"{request_detail}",
                     level=2,
                 )
                 last_exc = exc
@@ -1627,6 +1833,7 @@ def _extract_character(
                     raise  # proxies forbidden for this character - permanent, don't retry
                 if exc.status == 429:
                     pacer.on_rate_limit()
+                    generation_stats["rateLimits"] += 1
                     _clog(
                         f"warning: {label} rate-limited (429), backing off {backoff:.0f}s "
                         f"(attempt {attempt + 1}/{GENERATE_MAX_ATTEMPTS})"
@@ -1637,8 +1844,13 @@ def _extract_character(
                 _clog(f"warning: {label} attempt {attempt + 1} failed: {exc}")
                 time.sleep(0.5)
             except Exception as exc:  # noqa: BLE001 - transient parse/network, retried below
+                elapsed_ms = (time.monotonic() - started) * 1000
+                generation_stats["elapsedMs"] += elapsed_ms
                 last_exc = exc
-                _clog(f"warning: {label} attempt {attempt + 1} failed: {exc}")
+                _clog(
+                    f"warning: {label} attempt {attempt + 1} failed "
+                    f"after {elapsed_ms:.0f}ms: {exc}"
+                )
                 time.sleep(0.5)
         raise RuntimeError(
             f"{label} generateAlpha failed after {GENERATE_MAX_ATTEMPTS} attempts: {last_exc}"
@@ -1662,17 +1874,29 @@ def _extract_character(
                 not book.get("accessible") for book in public_lorebooks
             )
 
+        definition_in_meta = bool(
+            (meta.get("personality") or "").strip()
+            or (meta.get("scenario") or "").strip()
+        )
+        closed_book_count = sum(
+            not book.get("accessible") for book in public_lorebooks
+        )
+        _clog(
+            "metadata: "
+            f"definition={'yes' if definition_in_meta else 'no'} "
+            f"proxy={'no' if proxy_forbidden else 'yes'} "
+            f"attached_books={len(public_lorebooks)} "
+            f"public_books={_public_lorebook_count(public_lorebooks)} "
+            f"readable_entries={len(public_contents)} "
+            f"closed_books={closed_book_count}"
+        )
+
         # Start the avatar download now so it overlaps the generateAlpha passes.
         _start_avatar_download(driver, _avatar_url(meta))
 
         # The definition already lives in `meta` when the card is public OR we own
         # it (owners see their own private definition). Presence of personality/
         # scenario is the real signal - showdefinition is not required.
-        definition_in_meta = bool(
-            (meta.get("personality") or "").strip()
-            or (meta.get("scenario") or "").strip()
-        )
-
         # Fast path: definition in `meta` and no closed lorebook → no generateAlpha
         # at all. Exact and free; strictly preferred over the lossy JanitorLLM leak
         # even for proxy-forbidden characters we happen to own. (Public lorebook
@@ -1706,11 +1930,13 @@ def _extract_character(
             }
             if verbose:
                 result["diagnostics"] = {
-                    "publicLorebookCount": len(public_lorebooks),
-                    "publicEntryCount": len(public_contents),
+                    "attachedLorebookCount": len(public_lorebooks),
+                    "publicLorebookCount": _public_lorebook_count(public_lorebooks),
+                    "publicEntryCount": _public_entry_count(public_lorebooks),
                     "triggerPasses": [],
                     "mergedEntries": 0,
                     "fastPath": "definition-in-metadata",
+                    "generation": dict(generation_stats),
                 }
             _clog("capture complete (metadata fast path)")
             return result
@@ -1739,6 +1965,8 @@ def _extract_character(
                 passes=jllm_passes,
                 pacer=pacer,
                 clog=_clog,
+                detailed=verbose >= 3,
+                stats=generation_stats,
             )
             parsed = parse_leaked_definition(leaked)
             if not parsed["description"]:
@@ -1777,11 +2005,13 @@ def _extract_character(
             }
             if verbose:
                 result["diagnostics"] = {
-                    "publicLorebookCount": len(public_lorebooks),
-                    "publicEntryCount": len(public_contents),
+                    "attachedLorebookCount": len(public_lorebooks),
+                    "publicLorebookCount": _public_lorebook_count(public_lorebooks),
+                    "publicEntryCount": _public_entry_count(public_lorebooks),
                     "mode": "jllm-leak",
                     "leakChars": len(leaked),
                     "descriptionChars": len(parsed["description"]),
+                    "generation": dict(generation_stats),
                 }
             _clog(
                 f"capture complete (JanitorLLM reconstruction, {len(parsed['description'])} desc chars)"
@@ -1833,6 +2063,7 @@ def _extract_character(
 
         separations: list[dict[str, Any]] = []
         trigger_passes: list[dict[str, Any]] = []
+        discovered_entries: set[str] = set()
         full_payload = probe_payload
 
         if has_lorebook:
@@ -1850,6 +2081,13 @@ def _extract_character(
                 full_payload = payload
                 separated_pass = separate(payload, card, public_contents)
                 separations.append(separated_pass)
+                pass_entries = {
+                    _norm(entry)
+                    for entry in separated_pass.get("entries") or []
+                    if _norm(entry)
+                }
+                new_entries = pass_entries - discovered_entries
+                discovered_entries.update(pass_entries)
                 trigger_passes.append(
                     {
                         "index": index + 1,
@@ -1857,6 +2095,11 @@ def _extract_character(
                         "entriesFound": len(separated_pass.get("entries") or []),
                         "loreChars": len(separated_pass.get("lorebookText") or ""),
                     }
+                )
+                _clog(
+                    f"lorebook pass {index + 1}/{len(trigger_messages)} result: "
+                    f"entries={len(pass_entries)} new={len(new_entries)} "
+                    f"lore_chars={len(separated_pass.get('lorebookText') or '')}"
                 )
 
             if not separations:
@@ -1890,16 +2133,18 @@ def _extract_character(
                 if _norm(entry) not in recovered_constants
             ]
             candidates: list[tuple[str, str]] = []
+            trigger_search_probes = 0
             if find_triggers and searchable_entries:
                 candidates = build_trigger_search_messages(searchable_entries)[
                     :max_trigger_search_passes
                 ]
-                known_entries = {
-                    _norm(entry): entry
-                    for entry in separated["entries"]
-                    if _norm(entry)
-                }
                 _clog(f"testing {len(candidates)} candidate lorebook triggers")
+                _clog(
+                    f"trigger research baseline: constants={len(recovered_constants)} "
+                    f"searchable={len(searchable_entries)} candidates={len(candidates)}",
+                    level=4,
+                )
+                consecutive_misses = 0
                 for index, (candidate, trigger_text) in enumerate(candidates, 1):
                     try:
                         payload = _generate(
@@ -1910,15 +2155,55 @@ def _extract_character(
                             f"warning: trigger search {index} failed, skipping: {exc}"
                         )
                         continue
+                    trigger_search_probes += 1
                     found = (
                         separate(payload, card, public_contents).get("entries") or []
                     )
-                    found_keys = {_norm(entry) for entry in found}
-                    for entry_key in known_entries:
-                        if entry_key in found_keys:
-                            recovered_triggers.setdefault(entry_key, []).append(
-                                candidate
-                            )
+                    matched_keys = _trigger_search_matches(
+                        found, separated["entries"], recovered_constants
+                    )
+                    for entry_key in matched_keys:
+                        recovered_triggers.setdefault(entry_key, []).append(candidate)
+                    matched = len(matched_keys)
+                    consecutive_misses = 0 if matched else consecutive_misses + 1
+                    if verbose >= 4:
+                        _clog(
+                            f"trigger research {index}/{len(candidates)}: "
+                            + _trigger_search_debug_summary(
+                                candidate,
+                                found,
+                                separated["entries"],
+                                recovered_constants,
+                            ),
+                            level=4,
+                        )
+                    elif matched:
+                        _clog(
+                            f"trigger search {index}/{len(candidates)} matched "
+                            f"{matched} entr{'y' if matched == 1 else 'ies'}"
+                        )
+                    if _trigger_search_plateau_reached(
+                        searchable_entries,
+                        recovered_triggers,
+                        consecutive_misses,
+                        trigger_search_miss_limit,
+                    ):
+                        _clog(
+                            f"trigger search plateau: stopping after {index}/"
+                            f"{len(candidates)} candidates; all "
+                            f"{len(searchable_entries)} searchable entries matched "
+                            f"and the last {consecutive_misses} probes missed"
+                        )
+                        break
+                _clog(
+                    f"trigger search complete: probes={trigger_search_probes} "
+                    f"candidates={len(candidates)} "
+                    f"entries_matched={sum(bool(value) for value in recovered_triggers.values())}"
+                )
+                for group_summary in _trigger_activation_groups_summary(
+                    recovered_triggers
+                ):
+                    _clog(group_summary, level=4)
         else:
             # A generateAlpha echo contains the full assembled prompt. Without
             # an attached script there is no evidence that text outside the card
@@ -1928,6 +2213,7 @@ def _extract_character(
             recovered_triggers = {}
             searchable_entries = []
             candidates = []
+            trigger_search_probes = 0
 
         avatar_base64 = _await_avatar_download(driver)
         character = build_character(meta, full_payload, avatar_base64, card)
@@ -1948,20 +2234,39 @@ def _extract_character(
             "entries": separated["entries"],
             "recoveredTriggers": recovered_triggers,
             "recoveredConstants": list(recovered_constants),
+            "recoveredTriggerGroups": _trigger_activation_groups(
+                recovered_triggers
+            ),
         }
         if verbose:
             result["diagnostics"] = {
-                "publicLorebookCount": len(public_lorebooks),
-                "publicEntryCount": len(public_contents),
+                "attachedLorebookCount": len(public_lorebooks),
+                "publicLorebookCount": _public_lorebook_count(public_lorebooks),
+                "publicEntryCount": _public_entry_count(public_lorebooks),
                 "triggerPasses": trigger_passes,
                 "mergedEntries": len(separated.get("entries") or []),
                 "triggerSearchPasses": (
-                    len(candidates) if find_triggers and searchable_entries else 0
+                    trigger_search_probes
+                    if find_triggers and searchable_entries
+                    else 0
                 ),
+                "triggerSearchCandidates": len(candidates),
+                "triggerSearchMissLimit": trigger_search_miss_limit,
                 "triggersFound": sum(
                     bool(value) for value in recovered_triggers.values()
                 ),
+                "triggerActivationGroups": len(
+                    _trigger_activation_groups(recovered_triggers)
+                ),
+                "uniqueTriggersFound": len(
+                    {
+                        trigger.casefold()
+                        for triggers in recovered_triggers.values()
+                        for trigger in triggers
+                    }
+                ),
                 "constantEntries": len(recovered_constants),
+                "generation": dict(generation_stats),
             }
         _clog(f"capture complete ({len(separated['entries'])} lorebook entries)")
         return result
@@ -2037,6 +2342,9 @@ def extract_task(driver, data):
             find_triggers=bool(data.get("find_triggers")),
             max_trigger_search_passes=max(
                 1, int(data.get("max_trigger_search_passes") or 48)
+            ),
+            trigger_search_miss_limit=max(
+                0, int(data.get("trigger_search_miss_limit", 8))
             ),
             settle=max(0.0, float(data.get("trigger_settle_ms") or 0) / 1000.0),
             delete_chat_on_error=bool(data.get("delete_chat_on_error")),
@@ -2122,6 +2430,9 @@ def recent_task(driver, data):
     max_trigger_passes = max(1, int(data.get("max_trigger_passes") or 8))
     find_triggers = bool(data.get("find_triggers"))
     max_trigger_search_passes = max(1, int(data.get("max_trigger_search_passes") or 48))
+    trigger_search_miss_limit = max(
+        0, int(data.get("trigger_search_miss_limit", 8))
+    )
     settle = max(0.0, float(data.get("trigger_settle_ms") or 0) / 1000.0)
     delete_chat_on_error = bool(data.get("delete_chat_on_error"))
 
@@ -2148,6 +2459,7 @@ def recent_task(driver, data):
                 max_trigger_passes=max_trigger_passes,
                 find_triggers=find_triggers,
                 max_trigger_search_passes=max_trigger_search_passes,
+                trigger_search_miss_limit=trigger_search_miss_limit,
                 settle=settle,
                 delete_chat_on_error=delete_chat_on_error,
                 verbose=verbose,

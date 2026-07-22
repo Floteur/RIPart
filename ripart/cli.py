@@ -185,18 +185,18 @@ def headed_option(func):
 def verbose_option(func):
     """Add the shared repeatable ``-v``/``--verbose`` flag to a command.
 
-    Stacks like a normal CLI verbosity flag: ``-v`` = progress diagnostics
-    (chat/persona/trigger-pass narration, the classic --verbose), ``-vv`` = also
-    one line per HTTP/generateAlpha call (status + timing), ``-vvv`` = also a
-    truncated preview of each request/response payload — for digging all the
-    way down into a bug.
+    Stacks like a normal CLI verbosity flag: ``-v`` = extraction decisions and
+    progress, ``-vv`` = also one line per HTTP/generateAlpha call (status +
+    timing), ``-vvv`` = also compact request/response shape metadata, and
+    ``-vvvv`` = bounded semantic trigger-search research.
     """
     return click.option(
         "-v",
         "--verbose",
         count=True,
-        help="Repeatable: -v progress, -vv +wire-level call summaries, "
-        "-vvv +raw request/response payload previews.",
+        help="Repeatable: -v decisions/progress, -vv +call status/timing, "
+        "-vvv +content-free request/response shape metadata, "
+        "-vvvv +bounded trigger-search research.",
     )(func)
 
 
@@ -626,6 +626,14 @@ def inspect(url: str, headed: bool) -> None:
     help="[--find-triggers] Cap one-candidate trigger probes.",
 )
 @click.option(
+    "--trigger-search-miss-limit",
+    type=click.IntRange(min=0),
+    default=8,
+    show_default=True,
+    metavar="N",
+    help="[--find-triggers] Stop after full entry coverage and N misses; 0 is exhaustive.",
+)
+@click.option(
     "--jllm-leak/--no-jllm-leak",
     default=True,
     show_default=True,
@@ -643,6 +651,7 @@ def extract(
     no_multi_trigger: bool,
     find_triggers: bool,
     max_trigger_search_passes: int,
+    trigger_search_miss_limit: int,
     jllm_leak: bool,
     verbose: int,
     headed: bool,
@@ -694,6 +703,7 @@ def extract(
             "trigger_settle_ms": trigger_settle_ms,
             "find_triggers": find_triggers,
             "max_trigger_search_passes": max_trigger_search_passes,
+            "trigger_search_miss_limit": trigger_search_miss_limit,
             "jllm_leak": jllm_leak,
         },
         **browser_kwargs(headed),
@@ -722,13 +732,34 @@ def _print_extract_diagnostics(diagnostics: dict) -> None:
     if not diagnostics:
         console.print("  unavailable")
         return
+    _field("attached lorebooks", diagnostics.get("attachedLorebookCount", 0))
     _field("public lorebooks", diagnostics.get("publicLorebookCount", 0))
     _field("public lorebook entries", diagnostics.get("publicEntryCount", 0))
     _field("trigger passes", len(diagnostics.get("triggerPasses") or []))
     _field("merged lorebook entries", diagnostics.get("mergedEntries", 0))
+    generation = diagnostics.get("generation")
+    if isinstance(generation, dict) and generation.get("attempts"):
+        attempts = int(generation.get("attempts") or 0)
+        succeeded = int(generation.get("succeeded") or 0)
+        rate_limits = int(generation.get("rateLimits") or 0)
+        elapsed = float(generation.get("elapsedMs") or 0) / 1000
+        _field(
+            "generateAlpha",
+            f"{succeeded}/{attempts} successful, {rate_limits} rate limits, "
+            f"{_fmt_duration(elapsed)} server time",
+        )
     if "triggerSearchPasses" in diagnostics:
-        _field("trigger search probes", diagnostics["triggerSearchPasses"])
+        candidates = diagnostics.get("triggerSearchCandidates")
+        probes = diagnostics["triggerSearchPasses"]
+        _field(
+            "trigger search probes",
+            f"{probes}/{candidates}" if candidates is not None else probes,
+        )
         _field("entries with inferred keys", diagnostics.get("triggersFound", 0))
+        _field("unique inferred keys", diagnostics.get("uniqueTriggersFound", 0))
+        _field(
+            "activation groups", diagnostics.get("triggerActivationGroups", 0)
+        )
         _field("always-active entries", diagnostics.get("constantEntries", 0))
     for trigger_pass in diagnostics.get("triggerPasses") or []:
         console.print(
@@ -807,6 +838,14 @@ def _print_extract_diagnostics(diagnostics: dict) -> None:
     help="[--extract --find-triggers] Cap one-candidate trigger probes per card.",
 )
 @click.option(
+    "--trigger-search-miss-limit",
+    type=click.IntRange(min=0),
+    default=8,
+    show_default=True,
+    metavar="N",
+    help="[--extract --find-triggers] Stop after full coverage and N misses; 0 is exhaustive.",
+)
+@click.option(
     "--delete-chat-on-error",
     is_flag=True,
     default=False,
@@ -831,6 +870,7 @@ def recent(
     no_multi_trigger: bool,
     find_triggers: bool,
     max_trigger_search_passes: int,
+    trigger_search_miss_limit: int,
     delete_chat_on_error: bool,
     jllm_leak: bool,
     verbose: int,
@@ -870,6 +910,7 @@ def recent(
             "trigger_chunk_size": trigger_chunk_size,
             "find_triggers": find_triggers,
             "max_trigger_search_passes": max_trigger_search_passes,
+            "trigger_search_miss_limit": trigger_search_miss_limit,
             "delete_chat_on_error": delete_chat_on_error,
             "jllm_leak": jllm_leak,
         },

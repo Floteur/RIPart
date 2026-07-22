@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Datacat Bulk JanitorAI Character Retriever
 // @namespace    https://greasyfork.org/users/1622561-flonz
-// @version      1.5.3
+// @version      1.6.0
 // @description  Collect character UUIDs from JanitorAI pages and bulk-retrieve them through Datacat with retries, persistence, and result export.
 // @author       Flo
 // @license      MIT
@@ -37,7 +37,7 @@
     pageWindow.__datacatJanitorToolsLoaded = true;
     pageWindow.__datacatBulkRetrieverLoaded = true;
 
-    const SCRIPT_VERSION = "1.5.2";
+    const SCRIPT_VERSION = "1.6.0";
     const UUID_PATTERN =
         /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     const JANITOR_COLLECTOR_STORAGE_KEY = "datacat_janitor_uuid_collector_v1";
@@ -55,10 +55,51 @@
     const janitorRevisionKey = `${SHARED_KEY_PREFIX}janitor-revision`;
     const janitorClearKey = `${SHARED_KEY_PREFIX}janitor-clear`;
     const workerLeaseKey = `${SHARED_KEY_PREFIX}worker-lease`;
+    const workerCommandKey = `${SHARED_KEY_PREFIX}worker-command`;
     const sharedJobKey = `${SHARED_KEY_PREFIX}job`;
     const datacatInputKey = `${SHARED_KEY_PREFIX}datacat-input`;
     let tabRole = "unknown";
     let workerHeartbeatId = null;
+
+    function formatCount(count, singular, plural = `${singular}s`) {
+        return `${count} ${count === 1 ? singular : plural}`;
+    }
+
+    function setStatus(element, message, tone = "neutral") {
+        element.textContent = message;
+        element.dataset.tone = tone;
+    }
+
+    async function copyToClipboard(text) {
+        if (!text) return;
+
+        try {
+            await navigator.clipboard.writeText(text);
+        } catch {
+            const fallback = document.createElement("textarea");
+            fallback.value = text;
+            fallback.setAttribute("readonly", "");
+            fallback.style.cssText =
+                "position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none";
+            document.body.appendChild(fallback);
+            fallback.select();
+            let copied = false;
+            try {
+                copied = document.execCommand("copy");
+            } finally {
+                fallback.remove();
+            }
+            if (!copied) throw new Error("Clipboard access was denied");
+        }
+    }
+
+    function setPanelMinimised(panel, button, minimised) {
+        panel.classList.toggle("minimised", minimised);
+        button.textContent = minimised ? "+" : "−";
+        button.title = minimised ? "Expand" : "Minimise";
+        button.setAttribute("aria-label", button.title);
+        button.setAttribute("aria-expanded", String(!minimised));
+    }
 
     function touchTab(extra = {}) {
         const previous = GM_getValue(tabKey, {});
@@ -181,7 +222,17 @@
     if (hostname !== "datacat.run") return;
     tabRole = "datacat";
     touchTab();
-    setInterval(() => touchTab(), WORKER_HEARTBEAT_MS);
+    setInterval(() => {
+        touchTab();
+        const lease = getWorkerLease();
+        if (
+            state.running &&
+            !isLocalWorker() &&
+            (!lease || lease.expiresAt <= Date.now())
+        ) {
+            syncSharedJob(loadJob());
+        }
+    }, WORKER_HEARTBEAT_MS);
 
     function mountJanitorCollector() {
         const collectedIds = new Set();
@@ -217,24 +268,30 @@
 
         const panel = document.createElement("section");
         panel.id = "janitor-uuid-collector";
+        panel.setAttribute("aria-labelledby", "janitor-uuid-title");
         panel.innerHTML = `
-            <header id="janitor-uuid-header">
-                <div>
-                    <strong>Card UUID collector</strong>
-                    <small>v${SCRIPT_VERSION}</small>
+            <header id="janitor-uuid-header" title="Drag to move">
+                <div class="janitor-title-group">
+                    <span class="janitor-app-mark" aria-hidden="true">J</span>
+                    <div>
+                        <strong id="janitor-uuid-title">Card collector</strong>
+                        <small>JanitorAI · v${SCRIPT_VERSION}</small>
+                    </div>
                 </div>
-                <button type="button" id="janitor-uuid-toggle" title="Minimise">−</button>
+                <button type="button" id="janitor-uuid-toggle" title="Minimise"
+                    aria-label="Minimise" aria-controls="janitor-uuid-content" aria-expanded="true">−</button>
             </header>
             <div id="janitor-uuid-content">
-                <div id="janitor-uuid-status" role="status">Scanning this page…</div>
+                <div id="janitor-uuid-status" role="status" aria-live="polite" data-tone="neutral">Scanning this page…</div>
+                <label class="janitor-field-label" for="janitor-uuid-output">Collected character IDs</label>
                 <textarea id="janitor-uuid-output" readonly spellcheck="false"
                     placeholder="Character UUIDs found on this page will appear here."></textarea>
                 <div id="janitor-uuid-actions">
-                    <button type="button" id="janitor-uuid-scan">Scan page</button>
-                    <button type="button" id="janitor-uuid-copy" disabled>Copy UUIDs</button>
-                    <button type="button" id="janitor-uuid-copy-links" disabled>Copy as Janitor links</button>
-                    <button type="button" id="janitor-uuid-send" disabled>Send to Datacat</button>
-                    <button type="button" id="janitor-uuid-clear" disabled>Clear</button>
+                    <button type="button" id="janitor-uuid-scan" class="janitor-secondary">Watch for cards</button>
+                    <button type="button" id="janitor-uuid-send" class="janitor-primary" disabled>Send to Datacat</button>
+                    <button type="button" id="janitor-uuid-copy" class="janitor-secondary" disabled>Copy IDs</button>
+                    <button type="button" id="janitor-uuid-copy-links" class="janitor-secondary" disabled>Copy links</button>
+                    <button type="button" id="janitor-uuid-clear" class="janitor-quiet" disabled>Clear collection</button>
                 </div>
             </div>
         `;
@@ -243,48 +300,68 @@
         style.textContent = `
             #janitor-uuid-collector {
                 position: fixed; right: 18px; bottom: 18px; z-index: 2147483647;
-                width: min(410px, calc(100vw - 24px)); padding: 12px;
-                border: 1px solid rgba(255,255,255,.18); border-radius: 12px;
-                background: rgba(18,18,22,.97); color: #f5f5f5;
-                box-shadow: 0 12px 40px rgba(0,0,0,.45);
+                width: min(420px, calc(100vw - 24px)); max-height: calc(100vh - 24px);
+                padding: 14px; overflow: auto;
+                border: 1px solid rgba(255,255,255,.12); border-radius: 16px;
+                background: linear-gradient(160deg, rgba(30,30,39,.98), rgba(15,15,21,.98));
+                color: #f7f7fb; box-shadow: 0 18px 60px rgba(0,0,0,.5), 0 1px 0 rgba(255,255,255,.05) inset;
                 font: 14px/1.4 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
                 backdrop-filter: blur(12px);
             }
             #janitor-uuid-collector * { box-sizing: border-box; }
             #janitor-uuid-header {
                 display: flex; align-items: center; justify-content: space-between;
-                gap: 10px; margin-bottom: 9px; cursor: move; user-select: none;
+                gap: 10px; margin-bottom: 12px; cursor: move; user-select: none;
             }
-            #janitor-uuid-header > div { display: flex; align-items: baseline; gap: 7px; }
-            #janitor-uuid-header small { color: #9797a3; font-size: 10px; }
+            .janitor-title-group { display: flex; align-items: center; gap: 10px; min-width: 0; }
+            .janitor-title-group > div { display: grid; min-width: 0; }
+            .janitor-title-group strong { font-size: 14px; letter-spacing: .01em; }
+            #janitor-uuid-header small { color: #9898a8; font-size: 10px; }
+            .janitor-app-mark {
+                display: grid; place-items: center; width: 30px; height: 30px;
+                border-radius: 9px; background: linear-gradient(135deg,#8b78ff,#6251e8);
+                box-shadow: 0 5px 16px rgba(112,92,255,.28); color: #fff; font-weight: 800;
+            }
             #janitor-uuid-toggle {
                 width: 30px; height: 30px; padding: 0; border: 0;
-                border-radius: 7px; background: #35353d; color: #fff;
-                cursor: pointer; font-size: 20px;
+                border-radius: 8px; background: rgba(255,255,255,.08); color: #fff;
+                cursor: pointer; font-size: 20px; line-height: 1;
             }
             #janitor-uuid-status {
-                margin-bottom: 8px; color: #cfcfd6; font-size: 12px;
+                margin-bottom: 10px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.07);
+                border-radius: 9px; background: rgba(255,255,255,.045); color: #cfcfd8; font-size: 12px;
             }
+            #janitor-uuid-status::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #8b78ff; }
+            #janitor-uuid-status[data-tone="success"]::before { background: #62d58a; }
+            #janitor-uuid-status[data-tone="warning"]::before { background: #edb85d; }
+            #janitor-uuid-status[data-tone="error"]::before { background: #ef7373; }
+            .janitor-field-label { display: block; margin: 0 0 6px 2px; color: #aaaaba; font-size: 11px; font-weight: 650; }
             #janitor-uuid-output {
-                display: block; width: 100%; height: 180px; resize: vertical;
-                padding: 9px; border: 1px solid #454550; border-radius: 8px;
-                outline: none; background: #111116; color: #f5f5f5;
+                display: block; width: 100%; height: 164px; resize: vertical;
+                padding: 10px 11px; border: 1px solid #3c3c49; border-radius: 10px;
+                outline: none; background: rgba(7,7,11,.72); color: #f5f5f5;
                 font: 12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;
             }
             #janitor-uuid-actions {
-                display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px;
+                display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 7px; margin-top: 10px;
             }
             #janitor-uuid-actions button {
-                flex: 1 1 30%; min-width: 0; padding: 8px 7px; border: 0; border-radius: 7px;
-                background: #35353d; color: #fff; cursor: pointer; font-weight: 600;
+                min-width: 0; min-height: 36px; padding: 8px 9px; border: 1px solid transparent; border-radius: 9px;
+                color: #fff; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700;
             }
+            #janitor-uuid-actions .janitor-primary { background: linear-gradient(135deg,#7c68ff,#6653ef); box-shadow: 0 5px 15px rgba(112,92,255,.2); }
+            #janitor-uuid-actions .janitor-secondary { border-color: rgba(255,255,255,.08); background: rgba(255,255,255,.075); }
+            #janitor-uuid-actions .janitor-quiet { grid-column: 1 / -1; min-height: 32px; background: transparent; color: #a7a7b5; }
+            #janitor-uuid-actions button:not(:disabled):hover, #janitor-uuid-toggle:hover { filter: brightness(1.14); }
+            #janitor-uuid-actions button:focus-visible, #janitor-uuid-toggle:focus-visible, #janitor-uuid-output:focus-visible { outline: 2px solid #9b8cff; outline-offset: 2px; }
             #janitor-uuid-actions button:disabled { cursor: not-allowed; opacity: .42; }
-            #janitor-uuid-collector.minimised { width: 270px; }
+            #janitor-uuid-collector.minimised { width: 260px; }
             #janitor-uuid-collector.minimised #janitor-uuid-content { display: none; }
             #janitor-uuid-collector.minimised #janitor-uuid-header { margin-bottom: 0; }
             @media (max-width: 480px) {
                 #janitor-uuid-collector {
-                    right: 8px; left: 8px; bottom: 8px; width: auto;
+                    right: 8px !important; left: 8px !important;
+                    bottom: 8px !important; top: auto !important; width: auto;
                 }
             }
         `;
@@ -366,8 +443,12 @@
         function refreshOutput() {
             output.value = [...collectedIds].join("\n");
             const count = collectedIds.size;
-            const prefix = scanIntervalId === null ? "" : "Scanning · ";
-            status.textContent = `${prefix}${count} ID${count === 1 ? "" : "s"} · +${lastScanAdded} last scan.`;
+            const prefix = scanIntervalId === null ? "Ready" : "Watching page";
+            setStatus(
+                status,
+                `${prefix} · ${formatCount(count, "ID")} · +${lastScanAdded} last scan`,
+                scanIntervalId === null ? "neutral" : "success"
+            );
             copyButton.disabled = count === 0;
             copyLinksButton.disabled = count === 0;
             sendButton.disabled = count === 0;
@@ -420,7 +501,7 @@
             if (scanIntervalId !== null) {
                 clearInterval(scanIntervalId);
                 scanIntervalId = null;
-                scanButton.textContent = "Scan page";
+                scanButton.textContent = "Watch for cards";
             }
             scanGeneration++;
             collectedIds.clear();
@@ -464,34 +545,25 @@
             return added;
         }
 
-        async function copyText(text) {
-            if (!text) return;
-
-            try {
-                await navigator.clipboard.writeText(text);
-            } catch {
-                const fallback = document.createElement("textarea");
-                fallback.value = text;
-                fallback.style.position = "fixed";
-                fallback.style.opacity = "0";
-                document.body.appendChild(fallback);
-                fallback.select();
-                document.execCommand("copy");
-                fallback.remove();
-            }
-        }
-
         async function copyIds() {
-            await copyText([...collectedIds].join("\n"));
-            status.textContent = `Copied ${collectedIds.size} UUID${collectedIds.size === 1 ? "" : "s"}.`;
+            await copyToClipboard([...collectedIds].join("\n"));
+            setStatus(
+                status,
+                `Copied ${formatCount(collectedIds.size, "UUID")}.`,
+                "success"
+            );
         }
 
         async function copyJanitorLinks() {
             const links = [...collectedIds]
                 .map((id) => `https://janitorai.com/characters/${id}`)
                 .join("\n");
-            await copyText(links);
-            status.textContent = `Copied ${collectedIds.size} Janitor link${collectedIds.size === 1 ? "" : "s"}.`;
+            await copyToClipboard(links);
+            setStatus(
+                status,
+                `Copied ${formatCount(collectedIds.size, "Janitor link")}.`,
+                "success"
+            );
         }
 
         function sendToDatacat() {
@@ -504,7 +576,11 @@
             publishJanitorIds(ids);
             const openDatacatTabs = activeTabCount("datacat");
             if (openDatacatTabs) {
-                status.textContent = `Sent ${ids.length} ID${ids.length === 1 ? "" : "s"} to ${openDatacatTabs} active Datacat tab${openDatacatTabs === 1 ? "" : "s"}.`;
+                setStatus(
+                    status,
+                    `Sent ${formatCount(ids.length, "ID")} to ${formatCount(openDatacatTabs, "active Datacat tab")}.`,
+                    "success"
+                );
                 return;
             }
 
@@ -517,11 +593,15 @@
                 "datacat-janitor-import"
             );
             if (!target) {
-                status.textContent = "Could not open Datacat. Allow pop-ups, then try again.";
+                setStatus(status, "Could not open Datacat. Allow pop-ups, then try again.", "error");
                 return;
             }
             target.focus?.();
-            status.textContent = `Opened Datacat with ${ids.length} ID${ids.length === 1 ? "" : "s"} ready to import.`;
+            setStatus(
+                status,
+                `Opened Datacat with ${formatCount(ids.length, "ID")} ready to import.`,
+                "success"
+            );
         }
 
         function toggleScanning() {
@@ -529,7 +609,7 @@
                 clearInterval(scanIntervalId);
                 scanIntervalId = null;
                 scanGeneration++;
-                scanButton.textContent = "Scan page";
+                scanButton.textContent = "Watch for cards";
                 refreshOutput();
                 return;
             }
@@ -538,7 +618,7 @@
             scanIntervalId = setInterval(() => {
                 if (generation === scanGeneration) scanPage();
             }, 500);
-            scanButton.textContent = "Stop scanning";
+            scanButton.textContent = "Stop watching";
             refreshOutput();
             scanPage();
         }
@@ -546,12 +626,12 @@
         scanButton.addEventListener("click", toggleScanning);
         copyButton.addEventListener("click", () => {
             copyIds().catch((error) => {
-                status.textContent = `Could not copy UUIDs: ${String(error)}`;
+                setStatus(status, `Could not copy UUIDs: ${String(error)}`, "error");
             });
         });
         copyLinksButton.addEventListener("click", () => {
             copyJanitorLinks().catch((error) => {
-                status.textContent = `Could not copy Janitor links: ${String(error)}`;
+                setStatus(status, `Could not copy Janitor links: ${String(error)}`, "error");
             });
         });
         sendButton.addEventListener("click", sendToDatacat);
@@ -559,15 +639,13 @@
             clearCollector();
         });
         toggleButton.addEventListener("click", () => {
-            const minimised = panel.classList.toggle("minimised");
-            toggleButton.textContent = minimised ? "+" : "−";
-            toggleButton.title = minimised ? "Expand" : "Minimise";
+            const minimised = !panel.classList.contains("minimised");
+            setPanelMinimised(panel, toggleButton, minimised);
         });
     }
 
     const CONFIG = Object.freeze({
         storageKey: "datacat_bulk_retriever_v1",
-        jobStorageKey: "datacat_bulk_retriever_job_v1",
         existingCacheStorageKey: "datacat_bulk_retriever_existing_ids_v1",
         defaultDelayMs: 5000,
         defaultRetries: 3,
@@ -588,15 +666,22 @@
         requestControllers: new Set(),
         sleepCancel: null,
         results: [],
+        logs: [],
         pendingIds: [],
         currentIndex: 0,
         activeIndex: null,
-        startedAtMs: null
+        startedAtMs: null,
+        workerTabId: null,
+        statusMessage: "Ready.",
+        statusTone: "neutral",
+        progressCurrent: 0,
+        progressTotal: 0
     };
 
     let latestQueueCapacity = null;
     let saveTimer = null;
     let existingCacheSaveTimer = null;
+    let applyingSharedState = false;
     /** Filled in after panel mount; safe optional access before then. */
     let elements = null;
 
@@ -639,8 +724,8 @@
         if (!elements?.queueCount) return;
 
         elements.queueCount.textContent = latestQueueCapacity
-            ? `Queue: ${latestQueueCapacity.pendingCount ?? 0} / ${latestQueueCapacity.limit ?? "∞"}`
-            : "Queue: unavailable";
+            ? `Datacat queue: ${latestQueueCapacity.pendingCount ?? 0} / ${latestQueueCapacity.limit ?? "∞"}`
+            : "Datacat queue: unavailable";
     });
 
     function loadSettings() {
@@ -712,16 +797,38 @@
         GM_setValue(sharedJobKey, job);
     }
 
+    function isLocalWorker() {
+        return state.workerTabId === TAB_ID;
+    }
+
     function persistJobProgress() {
-        if (!state.running && !state.pendingIds.length) {
-            saveJob(null);
-            return;
+        if (applyingSharedState || (state.running && !isLocalWorker())) return;
+        if (!state.running) {
+            const lease = getWorkerLease();
+            if (
+                lease?.tabId !== TAB_ID &&
+                Number.isFinite(lease?.expiresAt) &&
+                lease.expiresAt > Date.now()
+            ) {
+                return;
+            }
+            state.workerTabId = TAB_ID;
         }
+
         saveJob({
-            workerTabId: TAB_ID,
+            workerTabId: state.workerTabId,
+            running: state.running,
+            paused: state.paused,
+            stopping: state.stopping,
             pendingIds: state.pendingIds,
             currentIndex: state.currentIndex,
             results: state.results,
+            logs: state.logs,
+            statusMessage: state.statusMessage,
+            statusTone: state.statusTone,
+            progressCurrent: state.progressCurrent,
+            progressTotal: state.progressTotal,
+            inputValue: elements.input.value,
             options: readOptions(),
             updatedAt: Date.now()
         });
@@ -1160,36 +1267,48 @@
 
     const panel = document.createElement("section");
     panel.id = "datacat-bulk-panel";
+    panel.setAttribute("aria-labelledby", "datacat-panel-title");
     panel.innerHTML = `
         <header class="datacat-panel-header" title="Drag to move">
-            <div>
-                <strong>Bulk character retrieval</strong>
-                <small id="datacat-version">v${SCRIPT_VERSION}</small>
+            <div class="datacat-title-group">
+                <span class="datacat-app-mark" aria-hidden="true">D</span>
+                <div>
+                    <strong id="datacat-panel-title">Bulk retriever</strong>
+                    <small id="datacat-version">Datacat · v${SCRIPT_VERSION}</small>
+                </div>
             </div>
-            <button type="button" id="datacat-toggle-panel" title="Minimise">−</button>
+            <button type="button" id="datacat-toggle-panel" title="Minimise"
+                aria-label="Minimise" aria-controls="datacat-panel-content" aria-expanded="true">−</button>
         </header>
 
         <div id="datacat-panel-content">
+            <div class="datacat-field-heading">
+                <label for="datacat-links-input">Character queue</label>
+                <span id="datacat-count" data-tone="neutral">0 valid IDs</span>
+            </div>
             <textarea
                 id="datacat-links-input"
                 spellcheck="false"
+                aria-describedby="datacat-input-help datacat-count"
                 placeholder="Paste JanitorAI links or character IDs. Spaces, commas and new lines are accepted."
             ></textarea>
+            <div id="datacat-input-help" class="datacat-input-help">
+                <span>Links, IDs, spaces and commas accepted</span>
+                <kbd>Ctrl</kbd><span>+</span><kbd>Enter</kbd><span>to start</span>
+            </div>
 
-            <div class="datacat-row">
-                <label>
-                    Delay
+            <div class="datacat-settings-row">
+                <label class="datacat-number-field">
+                    <span>Delay <small>seconds</small></span>
                     <input id="datacat-delay-input" type="number" min="0" step="0.5">
-                    s
                 </label>
 
-                <label>
-                    Retries
+                <label class="datacat-number-field">
+                    <span>Retries <small>per request</small></span>
                     <input id="datacat-retries-input" type="number" min="0" max="10" step="1">
                 </label>
 
-                <span id="datacat-queue-count">Queue: ? / ?</span>
-                <span id="datacat-count">0 valid IDs</span>
+                <span id="datacat-queue-count" class="datacat-chip">Datacat queue: unavailable</span>
             </div>
 
             <details class="datacat-advanced">
@@ -1217,46 +1336,56 @@
             </details>
 
             <div class="datacat-progress-wrap">
-                <progress id="datacat-progress" max="1" value="0"></progress>
-                <span id="datacat-progress-label">0 / 0</span>
+                <div class="datacat-progress-heading">
+                    <span>Progress</span>
+                    <span id="datacat-progress-label">0 / 0</span>
+                </div>
+                <progress id="datacat-progress" max="1" value="0" aria-label="Retrieval progress"></progress>
             </div>
 
-            <div class="datacat-actions">
-                <button type="button" id="datacat-start-button">Start</button>
+            <div class="datacat-actions datacat-primary-actions">
+                <button type="button" id="datacat-start-button">Start retrieval</button>
                 <button type="button" id="datacat-pause-button" disabled>Pause</button>
                 <button type="button" id="datacat-stop-button" disabled>Stop</button>
-                <button type="button" id="datacat-clear-button">Clear</button>
             </div>
 
             <div class="datacat-actions datacat-secondary-actions">
                 <button type="button" id="datacat-retry-failed-button" disabled>Retry failed</button>
                 <button type="button" id="datacat-copy-failed-button" disabled>Copy failed</button>
                 <button type="button" id="datacat-export-button" disabled>Export JSON</button>
-                <button type="button" id="datacat-resume-button" disabled>Resume job</button>
+                <button type="button" id="datacat-clear-button">Clear all</button>
             </div>
 
-            <div id="datacat-status" role="status">Ready.</div>
-            <div id="datacat-stats"></div>
-            <div id="datacat-log"></div>
+            <div id="datacat-status" role="status" aria-live="polite" data-tone="neutral">Ready.</div>
+            <div id="datacat-stats" aria-label="Retrieval results"></div>
+            <details id="datacat-log-wrap">
+                <summary>Activity log <span id="datacat-log-count">0</span></summary>
+                <div id="datacat-log"></div>
+            </details>
         </div>
     `;
 
     const style = document.createElement("style");
     style.textContent = `
         #datacat-bulk-panel {
+            --dc-accent: #7c68ff;
+            --dc-accent-strong: #6753ef;
+            --dc-surface: rgba(255,255,255,.055);
+            --dc-border: rgba(255,255,255,.1);
             position: fixed;
             z-index: 2147483647;
-            width: min(470px, calc(100vw - 24px));
+            width: min(480px, calc(100vw - 24px));
             max-height: calc(100vh - 24px);
-            padding: 12px;
+            padding: 14px;
             overflow: auto;
-            border: 1px solid rgba(255,255,255,.18);
-            border-radius: 12px;
-            background: rgba(18,18,22,.97);
-            color: #f5f5f5;
-            box-shadow: 0 12px 40px rgba(0,0,0,.45);
+            border: 1px solid rgba(255,255,255,.12);
+            border-radius: 16px;
+            background: linear-gradient(160deg,rgba(30,30,39,.98),rgba(15,15,21,.98));
+            color: #f7f7fb;
+            box-shadow: 0 18px 60px rgba(0,0,0,.5), 0 1px 0 rgba(255,255,255,.05) inset;
             font: 14px/1.4 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
             backdrop-filter: blur(12px);
+            scrollbar-color: #50505e transparent;
         }
         #datacat-bulk-panel * { box-sizing: border-box; }
         .datacat-panel-header {
@@ -1264,73 +1393,128 @@
             align-items: center;
             justify-content: space-between;
             gap: 10px;
-            margin-bottom: 10px;
+            margin-bottom: 14px;
             cursor: move;
             user-select: none;
         }
-        .datacat-panel-header > div {
+        .datacat-title-group {
             display: flex;
-            align-items: baseline;
-            gap: 7px;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
         }
-        #datacat-version { color: #9797a3; font-size: 10px; }
+        .datacat-title-group > div { display: grid; min-width: 0; }
+        .datacat-title-group strong { font-size: 14px; letter-spacing: .01em; }
+        #datacat-version { color: #9898a8; font-size: 10px; }
+        .datacat-app-mark {
+            display: grid; place-items: center; width: 30px; height: 30px;
+            border-radius: 9px; background: linear-gradient(135deg,var(--dc-accent),var(--dc-accent-strong));
+            box-shadow: 0 5px 16px rgba(112,92,255,.28); color: #fff; font-weight: 800;
+        }
         #datacat-toggle-panel {
             width: 30px; height: 30px; padding: 0; border: 0;
-            border-radius: 7px; background: #35353d; color: #fff;
-            cursor: pointer; font-size: 20px;
+            border-radius: 8px; background: rgba(255,255,255,.08); color: #fff;
+            cursor: pointer; font-size: 20px; line-height: 1;
         }
+        .datacat-field-heading, .datacat-progress-heading {
+            display: flex; align-items: center; justify-content: space-between; gap: 10px;
+        }
+        .datacat-field-heading { margin: 0 2px 6px; }
+        .datacat-field-heading label, .datacat-progress-heading > span:first-child {
+            color: #d8d8e2; font-size: 12px; font-weight: 700;
+        }
+        #datacat-count { color: #a9a9b8; font-size: 11px; }
+        #datacat-count[data-tone="success"] { color: #77d798; }
+        #datacat-count[data-tone="warning"] { color: #edbd6c; }
         #datacat-links-input {
-            display: block; width: 100%; min-height: 180px; max-height: 48vh;
-            resize: vertical; padding: 10px; border: 1px solid #454550;
-            border-radius: 8px; outline: none; background: #111116;
+            display: block; width: 100%; min-height: 164px; max-height: 45vh;
+            resize: vertical; padding: 11px 12px; border: 1px solid #3c3c49;
+            border-radius: 10px; outline: none; background: rgba(7,7,11,.72);
             color: #f5f5f5;
             font: 12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;
+            transition: border-color .15s, box-shadow .15s;
         }
-        #datacat-links-input:focus { border-color: #8d7dff; }
-        .datacat-row {
-            display: flex; align-items: center; justify-content: space-between;
-            flex-wrap: wrap; gap: 8px; margin-top: 10px; color: #cfcfd6;
+        #datacat-links-input:focus { border-color: var(--dc-accent); box-shadow: 0 0 0 3px rgba(124,104,255,.13); }
+        #datacat-links-input::placeholder { color: #747483; }
+        .datacat-input-help {
+            display: flex; align-items: center; gap: 4px; margin: 6px 2px 0;
+            color: #858594; font-size: 10px;
         }
-        .datacat-row label { display: flex; align-items: center; gap: 5px; }
-        .datacat-row input[type="number"] {
-            width: 58px; padding: 5px 7px; border: 1px solid #454550;
-            border-radius: 6px; background: #111116; color: #fff;
+        .datacat-input-help > span:first-child { margin-right: auto; }
+        .datacat-input-help kbd {
+            padding: 1px 5px; border: 1px solid #444451; border-bottom-width: 2px;
+            border-radius: 4px; background: #25252d; color: #bdbdc8; font: inherit;
+        }
+        .datacat-settings-row {
+            display: grid; grid-template-columns: auto auto 1fr; align-items: end;
+            gap: 8px; margin-top: 12px;
+        }
+        .datacat-number-field { display: grid; gap: 5px; color: #cfcfd8; font-size: 11px; }
+        .datacat-number-field small { color: #777786; font-size: 9px; font-weight: 500; }
+        .datacat-number-field input[type="number"] {
+            width: 84px; height: 34px; padding: 5px 8px; border: 1px solid #3c3c49;
+            border-radius: 8px; outline: none; background: rgba(7,7,11,.72); color: #fff;
+            font: inherit;
+        }
+        .datacat-chip {
+            justify-self: end; padding: 6px 8px; border: 1px solid var(--dc-border);
+            border-radius: 999px; background: var(--dc-surface); color: #aaaab8; font-size: 10px;
         }
         .datacat-advanced {
-            margin-top: 9px; padding: 7px 9px; border-radius: 7px;
-            background: #202027; color: #cfcfd6;
+            margin-top: 10px; padding: 9px 10px; border: 1px solid rgba(255,255,255,.06);
+            border-radius: 10px; background: rgba(255,255,255,.04); color: #cfcfd8;
         }
-        .datacat-advanced summary { cursor: pointer; }
-        .datacat-advanced label { display: block; margin-top: 6px; cursor: pointer; }
+        .datacat-advanced summary, #datacat-log-wrap summary { cursor: pointer; color: #bcbcca; font-size: 12px; font-weight: 700; }
+        .datacat-advanced label { display: flex; align-items: flex-start; gap: 7px; margin-top: 8px; cursor: pointer; font-size: 12px; }
+        .datacat-advanced input { accent-color: var(--dc-accent); }
         .datacat-progress-wrap {
-            display: flex; align-items: center; gap: 8px; margin-top: 10px;
+            margin-top: 12px;
         }
-        #datacat-progress { width: 100%; height: 12px; }
+        #datacat-progress {
+            display: block; width: 100%; height: 7px; margin-top: 7px; border: 0;
+            border-radius: 999px; overflow: hidden; background: #292932; appearance: none;
+        }
+        #datacat-progress::-webkit-progress-bar { background: #292932; }
+        #datacat-progress::-webkit-progress-value { border-radius: 999px; background: linear-gradient(90deg,var(--dc-accent-strong),#9c8cff); }
+        #datacat-progress::-moz-progress-bar { border-radius: 999px; background: linear-gradient(90deg,var(--dc-accent-strong),#9c8cff); }
         #datacat-progress-label {
-            min-width: 48px; color: #bcbcc5; font-size: 11px; text-align: right;
+            color: #a9a9b8; font-size: 11px; text-align: right;
         }
-        .datacat-actions { display: flex; gap: 7px; margin-top: 9px; }
+        .datacat-actions { display: grid; gap: 7px; margin-top: 10px; }
+        .datacat-primary-actions { grid-template-columns: 2fr 1fr 1fr; }
+        .datacat-secondary-actions { grid-template-columns: repeat(4,minmax(0,1fr)); }
         .datacat-actions button {
-            flex: 1; min-width: 0; padding: 8px 7px; border: 0;
-            border-radius: 7px; cursor: pointer; font-weight: 600;
+            min-width: 0; min-height: 36px; padding: 8px 7px; border: 1px solid transparent;
+            border-radius: 9px; color: #fff; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700;
         }
-        #datacat-start-button { background: #705cff; color: #fff; }
-        #datacat-pause-button { background: #b27c27; color: #fff; }
-        #datacat-stop-button { background: #b94141; color: #fff; }
-        #datacat-clear-button,
-        .datacat-secondary-actions button { background: #35353d; color: #fff; }
+        #datacat-start-button { background: linear-gradient(135deg,var(--dc-accent),var(--dc-accent-strong)); box-shadow: 0 5px 15px rgba(112,92,255,.2); }
+        #datacat-pause-button { border-color: rgba(237,184,93,.2); background: rgba(178,124,39,.22); color: #f0ca89; }
+        #datacat-stop-button { border-color: rgba(239,115,115,.2); background: rgba(185,65,65,.2); color: #f09a9a; }
+        .datacat-secondary-actions button { min-height: 32px; padding: 6px; border-color: rgba(255,255,255,.07); background: rgba(255,255,255,.055); color: #c8c8d2; font-size: 10px; }
+        #datacat-clear-button { color: #e0a0a0; }
+        .datacat-actions button:not(:disabled):hover, #datacat-toggle-panel:hover { filter: brightness(1.14); }
+        #datacat-bulk-panel button:focus-visible, #datacat-bulk-panel input:focus-visible, #datacat-bulk-panel summary:focus-visible { outline: 2px solid #9b8cff; outline-offset: 2px; }
         .datacat-actions button:disabled { cursor: not-allowed; opacity: .42; }
-        .datacat-secondary-actions button { padding: 6px; font-size: 11px; }
         #datacat-status {
-            margin-top: 10px; padding: 8px; border-radius: 7px;
-            background: #292932; color: #dddde5; overflow-wrap: anywhere;
+            margin-top: 10px; padding: 9px 10px; border: 1px solid rgba(255,255,255,.07);
+            border-radius: 9px; background: rgba(255,255,255,.045); color: #dddde5;
+            font-size: 12px; overflow-wrap: anywhere;
         }
+        #datacat-status::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--dc-accent); }
+        #datacat-status[data-tone="success"]::before { background: #62d58a; }
+        #datacat-status[data-tone="warning"]::before { background: #edb85d; }
+        #datacat-status[data-tone="error"]::before { background: #ef7373; }
         #datacat-stats {
-            min-height: 17px; margin-top: 6px; color: #aaaab5; font-size: 11px;
+            display: flex; gap: 6px; min-height: 17px; margin-top: 7px; color: #aaaab5; font-size: 10px;
         }
+        #datacat-stats span { flex: 1; padding: 5px 7px; border-radius: 7px; background: rgba(255,255,255,.035); text-align: center; }
+        #datacat-stats .retrieved { color: #77d798; }
+        #datacat-stats .failed { color: #ef9292; }
+        #datacat-log-wrap { display: none; margin-top: 8px; }
+        #datacat-log-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; margin-left: 4px; padding: 0 5px; border-radius: 999px; background: rgba(255,255,255,.08); font-size: 9px; }
         #datacat-log {
-            display: none; max-height: 160px; margin-top: 8px; padding: 8px;
-            overflow: auto; border-radius: 7px; background: #111116;
+            max-height: 160px; margin-top: 7px; padding: 8px;
+            overflow: auto; border: 1px solid rgba(255,255,255,.06); border-radius: 9px; background: rgba(7,7,11,.72);
             color: #bcbcc5;
             font: 11px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;
             white-space: pre-wrap; overflow-wrap: anywhere;
@@ -1339,7 +1523,7 @@
         #datacat-log .warning { color: #e2b96c; }
         #datacat-log .error { color: #eb8888; }
         #datacat-log .muted { color: #92929c; }
-        #datacat-bulk-panel.minimised { width: 285px; overflow: hidden; }
+        #datacat-bulk-panel.minimised { width: 260px; overflow: hidden; }
         #datacat-bulk-panel.minimised #datacat-panel-content { display: none; }
         #datacat-bulk-panel.minimised .datacat-panel-header { margin-bottom: 0; }
         @media (max-width: 520px) {
@@ -1347,6 +1531,10 @@
                 right: 8px !important; left: 8px !important;
                 bottom: 8px !important; top: auto !important; width: auto;
             }
+            .datacat-input-help > span:first-child { display: none; }
+            .datacat-settings-row { grid-template-columns: auto auto 1fr; }
+            .datacat-number-field input[type="number"] { width: 72px; }
+            .datacat-secondary-actions { grid-template-columns: repeat(2,minmax(0,1fr)); }
         }
     `;
 
@@ -1379,11 +1567,12 @@
         retryFailed: $("#datacat-retry-failed-button", panel),
         copyFailed: $("#datacat-copy-failed-button", panel),
         export: $("#datacat-export-button", panel),
-        resume: $("#datacat-resume-button", panel),
         toggle: $("#datacat-toggle-panel", panel),
         status: $("#datacat-status", panel),
         stats: $("#datacat-stats", panel),
         log: $("#datacat-log", panel),
+        logWrap: $("#datacat-log-wrap", panel),
+        logCount: $("#datacat-log-count", panel),
         header: $(".datacat-panel-header", panel),
         queueCount: $("#datacat-queue-count", panel)
     };
@@ -1404,22 +1593,55 @@
         );
     });
 
-    function updateStatus(message) {
-        elements.status.textContent = message;
+    function statusTone(message) {
+        if (
+            /finished|copied|imported|queued|synced|ready to retrieve/i.test(
+                message
+            )
+        ) {
+            return "success";
+        }
+        if (/failed|error|could not|no valid|unexpected|aborted/i.test(message)) {
+            return "error";
+        }
+        if (
+            /waiting|paused|stopping|stopped|incomplete|busy|retry/i.test(
+                message
+            )
+        ) {
+            return "warning";
+        }
+        return "neutral";
+    }
+
+    function updateStatus(message, tone = statusTone(message)) {
+        state.statusMessage = message;
+        state.statusTone = tone;
+        setStatus(elements.status, message, tone);
         console.log("[Datacat bulk]", message);
+        persistJobProgress();
+    }
+
+    function renderLogs() {
+        elements.log.textContent = "";
+        for (const entry of state.logs) {
+            const line = document.createElement("div");
+            line.className = entry.type;
+            line.textContent = `[${entry.time}] ${entry.message}`;
+            elements.log.appendChild(line);
+        }
+        elements.logWrap.style.display = state.logs.length ? "block" : "none";
+        elements.logCount.textContent = String(state.logs.length);
+        elements.log.scrollTop = elements.log.scrollHeight;
     }
 
     function appendLog(message, type = "muted") {
-        elements.log.style.display = "block";
-        const line = document.createElement("div");
-        line.className = type;
-        line.textContent = `[${timestamp()}] ${message}`;
-        elements.log.appendChild(line);
-
-        while (elements.log.childElementCount > CONFIG.maxLogLines) {
-            elements.log.removeChild(elements.log.firstChild);
+        state.logs.push({ time: timestamp(), message, type });
+        if (state.logs.length > CONFIG.maxLogLines) {
+            state.logs.splice(0, state.logs.length - CONFIG.maxLogLines);
         }
-        elements.log.scrollTop = elements.log.scrollHeight;
+        renderLogs();
+        persistJobProgress();
     }
 
     function getFailedIds() {
@@ -1439,37 +1661,46 @@
     function updateResultActions() {
         const hasResults = state.results.length > 0;
         const hasFailures = getFailedIds().length > 0;
-        const job = loadJob();
-        const hasResumable =
-            !state.running &&
-            job &&
-            Array.isArray(job.pendingIds) &&
-            job.currentIndex < job.pendingIds.length;
 
         elements.export.disabled = !hasResults;
         elements.copyFailed.disabled = !hasFailures;
         elements.retryFailed.disabled = !hasFailures || state.running;
-        elements.resume.disabled = !hasResumable;
     }
 
     function updateStats() {
         const counts = countByStatus();
-        elements.stats.textContent =
-            `Retrieved: ${counts.retrieved} · Skipped: ${counts.skipped} · Failed: ${counts.failed}`;
+        elements.stats.innerHTML = `
+            <span class="retrieved">${counts.retrieved} retrieved</span>
+            <span>${counts.skipped} skipped</span>
+            <span class="failed">${counts.failed} failed</span>
+        `;
         updateResultActions();
     }
 
     function updateProgress(current, total) {
+        state.progressCurrent = current;
+        state.progressTotal = total;
         elements.progress.max = Math.max(1, total);
         elements.progress.value = Math.min(current, total);
         elements.progressLabel.textContent = `${current} / ${total}`;
+        elements.progress.setAttribute(
+            "aria-valuetext",
+            `${current} of ${total}`
+        );
+        persistJobProgress();
     }
 
     function updateCount() {
         const { ids, invalid } = parseCharacterIds(elements.input.value);
         elements.count.textContent =
-            `${ids.length} valid ID${ids.length === 1 ? "" : "s"}` +
-            (invalid.length ? ` · ${invalid.length} invalid` : "");
+            formatCount(ids.length, "valid ID") +
+            (invalid.length ? ` · ${formatCount(invalid.length, "invalid item")}` : "");
+        elements.count.dataset.tone = invalid.length
+            ? "warning"
+            : ids.length
+              ? "success"
+              : "neutral";
+        elements.input.setAttribute("aria-invalid", String(invalid.length > 0));
         saveSettingsDebounced({ input: elements.input.value });
     }
 
@@ -1505,6 +1736,13 @@
         return ids.filter((id) => !terminalIds.has(id));
     }
 
+    function setIdleQueue(ids) {
+        if (state.running) return;
+        state.pendingIds = [...ids];
+        state.currentIndex = 0;
+        updateProgress(0, state.pendingIds.length);
+    }
+
     function excludeKnownExistingIds(ids) {
         if (!elements.skipExisting.checked || elements.alwaysReextract.checked) {
             return ids;
@@ -1525,6 +1763,7 @@
         const existing = parseCharacterIds(elements.input.value).ids;
         const ids = [...new Set([...existing, ...newIds])];
         setInputValue(ids.join("\n"), { mirror: true });
+        setIdleQueue(ids);
         elements.input.focus();
         updateStatus(
             `Imported ${newIds.length} Janitor ID${newIds.length === 1 ? "" : "s"}; ${ids.length} ready to retrieve.`
@@ -1537,6 +1776,7 @@
         if (!imported.length) return;
 
         if (state.running) {
+            if (!isLocalWorker()) return;
             const have = new Set(state.pendingIds);
             const added = imported.filter((id) => !have.has(id));
             if (!added.length) return;
@@ -1557,26 +1797,92 @@
         const ids = [...new Set([...existing, ...imported])];
         if (ids.length === existing.length) return;
         setInputValue(ids.join("\n"), { mirror: true });
+        setIdleQueue(ids);
         updateStatus(
             `Synced ${imported.length} ID${imported.length === 1 ? "" : "s"} from active Janitor tab${imported.length === 1 ? "" : "s"}.`
         );
     }
 
     function syncSharedJob(job) {
-        if (state.running || !job || !Array.isArray(job.pendingIds)) return;
-        state.pendingIds = [...job.pendingIds];
-        state.currentIndex = Number.isFinite(job.currentIndex) ? job.currentIndex : 0;
-        state.results = Array.isArray(job.results) ? [...job.results] : [];
-        setInputValue(
-            remainingQueueIds(state.pendingIds, state.results).join("\n")
-        );
-        applyJobOptions(job.options);
-        updateProgress(state.results.length, state.pendingIds.length);
-        updateStats();
-        if (state.currentIndex < state.pendingIds.length) {
-            updateStatus(
-                `Another Datacat tab is processing ${state.currentIndex}/${state.pendingIds.length}.`
+        if (state.running && isLocalWorker()) return;
+
+        applyingSharedState = true;
+        try {
+            if (!job || !Array.isArray(job.pendingIds)) {
+                state.running = false;
+                state.paused = false;
+                state.stopping = false;
+                state.workerTabId = null;
+                state.pendingIds = [];
+                state.results = [];
+                state.logs = [];
+                state.currentIndex = 0;
+                state.statusMessage = "Ready.";
+                state.statusTone = "neutral";
+                setInputValue("");
+                renderLogs();
+                updateProgress(0, 0);
+                updateStats();
+                setRunningUi(false);
+                elements.pause.textContent = "Pause";
+                setStatus(elements.status, "Ready.", "neutral");
+                return;
+            }
+
+            const lease = getWorkerLease();
+            const workerIsActive =
+                job.running === true &&
+                lease?.tabId === job.workerTabId &&
+                lease.expiresAt > Date.now();
+
+            state.workerTabId = job.workerTabId || null;
+            state.running = workerIsActive;
+            state.paused = workerIsActive && job.paused === true;
+            state.stopping = workerIsActive && job.stopping === true;
+            state.pendingIds = [...job.pendingIds];
+            state.currentIndex = Number.isFinite(job.currentIndex)
+                ? job.currentIndex
+                : 0;
+            state.results = Array.isArray(job.results) ? [...job.results] : [];
+            state.logs = Array.isArray(job.logs) ? [...job.logs] : [];
+
+            setInputValue(
+                typeof job.inputValue === "string"
+                    ? job.inputValue
+                    : remainingQueueIds(
+                          state.pendingIds,
+                          state.results
+                      ).join("\n")
             );
+            applyJobOptions(job.options);
+            renderLogs();
+            updateProgress(
+                Number.isFinite(job.progressCurrent)
+                    ? job.progressCurrent
+                    : state.results.length,
+                Number.isFinite(job.progressTotal)
+                    ? job.progressTotal
+                    : state.pendingIds.length
+            );
+            updateStats();
+            setRunningUi(state.running);
+            elements.pause.textContent = state.paused ? "Resume" : "Pause";
+
+            const message = workerIsActive
+                ? job.statusMessage || "Retrieval is running."
+                : job.running
+                  ? "The worker tab closed. Start retrieval to continue the remaining queue."
+                  : job.statusMessage || "Ready.";
+            const tone = workerIsActive
+                ? job.statusTone || "neutral"
+                : job.running
+                  ? "warning"
+                  : job.statusTone || "neutral";
+            state.statusMessage = message;
+            state.statusTone = tone;
+            setStatus(elements.status, message, tone);
+        } finally {
+            applyingSharedState = false;
         }
     }
 
@@ -1619,6 +1925,7 @@
             publicFeed: elements.publicFeed.checked,
             separateWorker: elements.separateWorker.checked
         });
+        persistJobProgress();
     }
 
     function applyJobOptions(options) {
@@ -1653,10 +1960,11 @@
         elements.alwaysReextract.disabled = running;
         elements.publicFeed.disabled = running;
         elements.separateWorker.disabled = running;
+        elements.pause.setAttribute("aria-pressed", String(state.paused));
         updateResultActions();
     }
 
-    async function processIds(sourceIds, { resumeFrom = 0, priorResults = [] } = {}) {
+    async function processIds(sourceIds) {
         if (!(await acquireWorkerLease())) {
             const lease = getWorkerLease();
             updateStatus(
@@ -1669,40 +1977,36 @@
         startWorkerHeartbeat();
         const options = readOptions();
 
+        state.workerTabId = TAB_ID;
         state.running = true;
         state.paused = false;
         state.stopping = false;
-        state.results = [...priorResults];
+        state.results = [];
         state.pendingIds = [...sourceIds];
         // Live queue: pushing to state.pendingIds (e.g. Janitor sends mid-run)
         // extends this run because the loop and existence checks read it directly.
         const ids = state.pendingIds;
-        state.currentIndex = resumeFrom;
+        state.currentIndex = 0;
         state.startedAtMs = Date.now();
-        persistJobProgress();
 
-        if (resumeFrom === 0) {
-            elements.log.textContent = "";
-            elements.log.style.display = "none";
-        }
+        state.logs = [];
+        elements.logWrap.open = false;
+        renderLogs();
+        persistJobProgress();
 
         elements.pause.textContent = "Pause";
         updateProgress(state.results.length, ids.length);
         updateStats();
         setRunningUi(true);
 
-        appendLog(
-            resumeFrom > 0
-                ? `Resumed queue at ${resumeFrom + 1}/${ids.length}.`
-                : `Started queue with ${ids.length} character(s).`
-        );
+        appendLog(`Started queue with ${ids.length} character(s).`);
 
         const shouldCheckExisting =
             options.skipExisting && !options.alwaysReextract;
         const existingStatuses = new Map();
         const completedIds = new Set(state.results.map((result) => result.id));
         const startedIds = new Set();
-        let nextExistenceCheckIndex = resumeFrom;
+        let nextExistenceCheckIndex = 0;
         let activeExistenceChecks = 0;
         let queueRefreshTimer = null;
         const refreshQueueWithoutCompleted = () => {
@@ -1790,7 +2094,7 @@
         fillExistenceCheckQueue();
 
         try {
-            let index = resumeFrom;
+            let index = 0;
             while (true) {
                 // Keep the worker alive briefly after draining the queue. This
                 // closes the race where a Janitor send arrives at the exact
@@ -1820,7 +2124,7 @@
                 startedIds.add(id);
 
                 updateQueueProgress();
-                const eta = formatEta(index - resumeFrom, ids.length - resumeFrom, state.startedAtMs);
+                const eta = formatEta(index, ids.length, state.startedAtMs);
                 updateStatus(
                     `[${index + 1}/${ids.length}] Processing ${id}…${eta}`
                 );
@@ -1938,7 +2242,6 @@
             updateStatus(
                 `Finished. Retrieved: ${counts.retrieved}, skipped: ${counts.skipped}, failed: ${counts.failed}.`
             );
-            saveJob(null);
         } catch (error) {
             if (error.message === "Stopped by user") {
                 updateStatus(
@@ -1948,7 +2251,7 @@
                 persistJobProgress();
             } else if (isAuthError(error)) {
                 updateStatus(
-                    `Stopped: authentication failed. Refresh Datacat and resume.`
+                    "Stopped: authentication failed. Refresh Datacat, then start the remaining queue."
                 );
                 appendLog(`Queue aborted: ${String(error)}`, "error");
                 persistJobProgress();
@@ -1974,11 +2277,12 @@
             setRunningUi(false);
             elements.pause.textContent = "Pause";
             updateStats();
+            persistJobProgress();
         }
     }
 
     function stopImmediately() {
-        if (!state.running) return;
+        if (!state.running || !isLocalWorker()) return;
         state.stopping = true;
         state.paused = false;
         elements.stop.disabled = true;
@@ -1986,6 +2290,26 @@
         updateStatus("Stopping…");
         for (const controller of state.requestControllers) controller.abort();
         state.sleepCancel?.();
+    }
+
+    function togglePause() {
+        if (!state.running || !isLocalWorker()) return;
+        state.paused = !state.paused;
+        elements.pause.textContent = state.paused ? "Resume" : "Pause";
+        elements.pause.setAttribute("aria-pressed", String(state.paused));
+        updateStatus(state.paused ? "Paused." : "Resuming…");
+        persistJobProgress();
+    }
+
+    function sendWorkerCommand(type) {
+        if (!state.running || !state.workerTabId) return;
+        GM_setValue(workerCommandKey, {
+            id: `${TAB_ID}-${Date.now().toString(36)}`,
+            type,
+            targetTabId: state.workerTabId,
+            sentByTabId: TAB_ID,
+            at: Date.now()
+        });
     }
 
     function downloadResults() {
@@ -2019,21 +2343,8 @@
         const failed = getFailedIds();
         if (!failed.length) return;
 
-        const text = failed.join("\n");
-        try {
-            await navigator.clipboard.writeText(text);
-        } catch {
-            const ta = document.createElement("textarea");
-            ta.value = text;
-            ta.style.cssText = "position:fixed;left:-9999px;top:0";
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand("copy");
-            ta.remove();
-        }
-        updateStatus(
-            `Copied ${failed.length} failed ID${failed.length === 1 ? "" : "s"}.`
-        );
+        await copyToClipboard(failed.join("\n"));
+        updateStatus(`Copied ${formatCount(failed.length, "failed ID")}.`);
     }
 
     function applySavedSettings() {
@@ -2047,9 +2358,7 @@
         elements.separateWorker.checked = settings.separateWorker ?? true;
 
         if (settings.minimised) {
-            panel.classList.add("minimised");
-            elements.toggle.textContent = "+";
-            elements.toggle.title = "Expand";
+            setPanelMinimised(panel, elements.toggle, true);
         }
 
         if (Number.isFinite(settings.left) && Number.isFinite(settings.top)) {
@@ -2062,17 +2371,6 @@
 
         updateCount();
         updateStats();
-
-        const job = loadJob();
-        if (
-            job &&
-            Array.isArray(job.pendingIds) &&
-            job.currentIndex < job.pendingIds.length
-        ) {
-            updateStatus(
-                `Incomplete job found (${job.currentIndex}/${job.pendingIds.length}). Click Resume job.`
-            );
-        }
     }
 
     function clampPanelToViewport(panel) {
@@ -2157,11 +2455,12 @@
         updateCount();
         clearTimeout(inputSyncTimer);
         inputSyncTimer = setTimeout(() => {
+            setIdleQueue(parseCharacterIds(elements.input.value).ids);
             GM_setValue(datacatInputKey, elements.input.value);
         }, CONFIG.saveDebounceMs);
     });
     GM_addValueChangeListener(datacatInputKey, (_key, _old, value, remote) => {
-        if (!remote || state.running) return;
+        if (!remote || (state.running && isLocalWorker())) return;
         if (typeof value !== "string" || value === elements.input.value) return;
         setInputValue(value);
     });
@@ -2196,26 +2495,37 @@
 
     elements.pause.addEventListener("click", () => {
         if (!state.running) return;
-        state.paused = !state.paused;
-        elements.pause.textContent = state.paused ? "Resume" : "Pause";
-        updateStatus(state.paused ? "Paused." : "Resuming…");
-        persistJobProgress();
+        if (isLocalWorker()) togglePause();
+        else sendWorkerCommand("toggle-pause");
     });
 
-    elements.stop.addEventListener("click", stopImmediately);
+    elements.stop.addEventListener("click", () => {
+        if (isLocalWorker()) stopImmediately();
+        else {
+            sendWorkerCommand("stop");
+            setStatus(elements.status, "Stopping…", "warning");
+        }
+    });
 
     elements.clear.addEventListener("click", () => {
         if (state.running) return;
-        state.results = [];
-        state.pendingIds = [];
-        state.currentIndex = 0;
-        setInputValue("", { mirror: true });
-        elements.log.textContent = "";
-        elements.log.style.display = "none";
+        applyingSharedState = true;
+        try {
+            state.workerTabId = null;
+            state.results = [];
+            state.logs = [];
+            state.pendingIds = [];
+            state.currentIndex = 0;
+            setInputValue("", { mirror: true });
+            renderLogs();
+            elements.logWrap.open = false;
+            updateStatus("Ready.");
+            updateProgress(0, 0);
+            updateStats();
+        } finally {
+            applyingSharedState = false;
+        }
         saveJob(null);
-        updateStatus("Ready.");
-        updateProgress(0, 0);
-        updateStats();
     });
 
     elements.retryFailed.addEventListener("click", () => {
@@ -2224,26 +2534,6 @@
             setInputValue(failed.join("\n"), { mirror: true });
             processIds(failed);
         }
-    });
-
-    elements.resume.addEventListener("click", () => {
-        if (state.running) return;
-        const job = loadJob();
-        if (
-            !job ||
-            !Array.isArray(job.pendingIds) ||
-            job.currentIndex >= job.pendingIds.length
-        ) {
-            updateStatus("No incomplete job to resume.");
-            updateResultActions();
-            return;
-        }
-        setInputValue(job.pendingIds.join("\n"));
-        applyJobOptions(job.options);
-        processIds(job.pendingIds, {
-            resumeFrom: job.currentIndex,
-            priorResults: Array.isArray(job.results) ? job.results : []
-        });
     });
 
     elements.copyFailed.addEventListener("click", () => {
@@ -2255,9 +2545,8 @@
     elements.export.addEventListener("click", downloadResults);
 
     elements.toggle.addEventListener("click", () => {
-        const minimised = panel.classList.toggle("minimised");
-        elements.toggle.textContent = minimised ? "+" : "−";
-        elements.toggle.title = minimised ? "Expand" : "Minimise";
+        const minimised = !panel.classList.contains("minimised");
+        setPanelMinimised(panel, elements.toggle, minimised);
         saveSettings({ minimised });
     });
 
@@ -2272,7 +2561,7 @@
             elements.start.click();
         }
         if (event.key === "Escape" && state.running) {
-            stopImmediately();
+            elements.stop.click();
         }
     });
 
@@ -2281,7 +2570,11 @@
             clearTimeout(existingCacheSaveTimer);
             saveExistingIdCache();
         }
-        if (!state.running) return;
+        if (!state.running || !isLocalWorker()) return;
+        state.running = false;
+        state.paused = false;
+        state.statusMessage = "The worker tab closed.";
+        state.statusTone = "warning";
         persistJobProgress();
         releaseWorkerLease();
         event.preventDefault();
@@ -2289,6 +2582,8 @@
     });
 
     applySavedSettings();
+    const initialSharedJob = loadJob();
+    if (initialSharedJob) syncSharedJob(initialSharedJob);
     const initialPanelPosition = clampPanelToViewport(panel);
     if (initialPanelPosition) saveSettings(initialPanelPosition);
     importJanitorIdsFromHash();
@@ -2300,14 +2595,29 @@
     GM_addValueChangeListener(sharedJobKey, (_key, _old, job, remote) => {
         if (remote) syncSharedJob(job);
     });
+    GM_addValueChangeListener(workerCommandKey, (_key, _old, command, remote) => {
+        if (
+            !remote ||
+            !isLocalWorker() ||
+            command?.targetTabId !== TAB_ID
+        ) {
+            return;
+        }
+        if (command.type === "toggle-pause") togglePause();
+        else if (command.type === "stop") stopImmediately();
+    });
     GM_addValueChangeListener(workerLeaseKey, (_key, _old, lease, remote) => {
-        if (remote && state.running && lease?.tabId && lease.tabId !== TAB_ID) {
+        if (
+            remote &&
+            state.running &&
+            isLocalWorker() &&
+            lease?.tabId &&
+            lease.tabId !== TAB_ID
+        ) {
             updateStatus("Another tab took the retrieval worker; stopping this tab.");
             stopImmediately();
         }
     });
-    syncSharedJob(loadJob());
-
     pageWindow.addEventListener("hashchange", importJanitorIdsFromHash);
     enableDragging(panel, elements.header, (rect) => {
         saveSettings({

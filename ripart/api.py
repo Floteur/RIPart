@@ -153,6 +153,9 @@ def extract(
     trigger_chunk_size: int = 2500,
     trigger_settle_ms: int = 0,
     multi_trigger: bool = True,
+    find_triggers: bool = False,
+    max_trigger_search_passes: int = 48,
+    trigger_search_miss_limit: int = 8,
     jllm_leak: bool = False,
     verbose: int = 0,
     headless: bool = True,
@@ -185,11 +188,12 @@ def extract(
     V3 card + embedded lorebook) and the path is added under ``result["savedPath"]``.
     Set ``save=False`` to get the data without touching disk.
 
-    ``verbose`` is a level, not just on/off: 1 prints progress diagnostics
-    (routed through ``log`` for Saucepan URLs), 2 adds wire-level HTTP/generateAlpha
-    summaries, 3 adds truncated raw request/response payload previews — useful
-    for digging into a failure. Levels 2/3 print directly (they are not routed
-    through ``log``).
+    ``verbose`` is a level, not just on/off: 1 prints extraction decisions and
+    progress (routed through ``log`` for Saucepan URLs), 2 adds one compact
+    HTTP/generateAlpha status-and-timing line per call, and 3 adds content-free
+    request/response shape metadata. Level 4 adds bounded semantic trigger-search
+    traces, including candidate and matched-entry previews. Levels 2-4 print
+    directly (they are not routed through ``log``).
     """
     if clank.is_clank_url(url):
         clank.set_trace_level(verbose)
@@ -259,6 +263,9 @@ def extract(
                 "max_trigger_passes": 1 if not multi_trigger else max_trigger_passes,
                 "trigger_chunk_size": trigger_chunk_size,
                 "trigger_settle_ms": trigger_settle_ms,
+                "find_triggers": find_triggers,
+                "max_trigger_search_passes": max_trigger_search_passes,
+                "trigger_search_miss_limit": trigger_search_miss_limit,
                 "jllm_leak": jllm_leak,
             },
             **_browser_kwargs(headless),
@@ -280,6 +287,9 @@ def recent(
     max_trigger_passes: int = 8,
     trigger_chunk_size: int = 2500,
     multi_trigger: bool = True,
+    find_triggers: bool = False,
+    max_trigger_search_passes: int = 48,
+    trigger_search_miss_limit: int = 8,
     delete_chat_on_error: bool = False,
     jllm_leak: bool = False,
     verbose: int = 0,
@@ -308,6 +318,9 @@ def recent(
             "verbose": verbose,
             "max_trigger_passes": 1 if not multi_trigger else max_trigger_passes,
             "trigger_chunk_size": trigger_chunk_size,
+            "find_triggers": find_triggers,
+            "max_trigger_search_passes": max_trigger_search_passes,
+            "trigger_search_miss_limit": trigger_search_miss_limit,
             "delete_chat_on_error": delete_chat_on_error,
             "jllm_leak": jllm_leak,
         },

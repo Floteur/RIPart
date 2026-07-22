@@ -18,6 +18,7 @@ def test_lorebook_record_is_shared_by_source_id_and_tracks_characters(tmp_path):
     book = {
         "id": "book-42",
         "title": "Shared setting",
+        "description": "The canonical shared setting.",
         "worldInfo": {
             "entries": {
                 "0": {
@@ -37,9 +38,27 @@ def test_lorebook_record_is_shared_by_source_id_and_tracks_characters(tmp_path):
         (tmp_path / "lorebooks" / "janitor" / "book-42.json").read_text()
     )
     assert record["sourceLorebookId"] == "book-42"
+    assert record["description"] == "The canonical shared setting."
     assert record["characterIds"] == ["char-a", "char-b"]
     assert record["worldInfo"]["entries"] == book["worldInfo"]["entries"]
     assert record["entryCount"] == 1
+
+
+def test_lorebook_refresh_preserves_description_when_api_omits_it(tmp_path):
+    book = {
+        "id": "book-42",
+        "description": "Description from the provider API.",
+        "worldInfo": {"entries": {}},
+    }
+    update_lorebook_library(tmp_path, "char-a", _result(book))
+    book.pop("description")
+
+    update_lorebook_library(tmp_path, "char-a", _result(book))
+
+    record = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "book-42.json").read_text()
+    )
+    assert record["description"] == "Description from the provider API."
 
 
 def test_lorebook_record_uses_content_fingerprint_when_no_provider_id(tmp_path):
@@ -132,6 +151,94 @@ def test_private_observation_is_attributed_when_shared_characters_leave_one_book
     assert first_capture["observations"][0]["attribution"] == {
         "status": "inferred",
         "candidates": ["shared"],
+    }
+
+
+def test_recovered_entries_are_attributed_only_to_closed_attachment(tmp_path):
+    result = {
+        "url": "https://janitorai.com/characters/example",
+        "publicLorebooks": [
+            {
+                "id": "public-book",
+                "title": "Readable",
+                "accessible": True,
+                "worldInfo": {"entries": {"0": {"content": "Public fact."}}},
+            },
+            {
+                "id": "closed-book",
+                "title": "Closed",
+                "accessible": False,
+                "worldInfo": {"entries": {}},
+            },
+        ],
+        "entries": ["Always private.", "Triggered private.", "Unknown private."],
+        "recoveredConstants": ["Always private."],
+        "recoveredTriggers": {
+            "triggered private.": ["secret", "private fact"]
+        },
+    }
+
+    update_lorebook_library(tmp_path, "char-a", result)
+
+    closed = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "closed-book.json").read_text()
+    )
+    assert closed["recoveredEntryCount"] == 3
+    assert closed["recoveredObservations"][0]["attribution"] == {
+        "status": "inferred",
+        "candidates": ["closed-book"],
+    }
+    entries = closed["recoveredWorldInfo"]["entries"]
+    assert entries["0"]["constant"] is True
+    assert entries["0"]["key"] == []
+    assert entries["1"]["constant"] is False
+    assert entries["1"]["key"] == ["secret", "private fact"]
+    assert entries["1"]["disable"] is False
+    assert entries["2"]["constant"] is False
+    assert entries["2"]["key"] == []
+    assert entries["2"]["disable"] is True
+    assert entries["2"]["extensions"]["ripart"]["activation"] == "unknown"
+    public = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "public-book.json").read_text()
+    )
+    assert public["recoveredObservations"] == []
+
+
+def test_new_visibility_replaces_stale_broad_attribution_sighting(tmp_path):
+    result = {
+        "url": "https://janitorai.com/characters/example",
+        "publicLorebooks": [
+            {
+                "id": "book-a",
+                "accessible": False,
+                "worldInfo": {"entries": {}},
+            },
+            {
+                "id": "book-b",
+                "accessible": False,
+                "worldInfo": {"entries": {}},
+            },
+        ],
+        "entries": ["Recovered fact."],
+    }
+    update_lorebook_library(tmp_path, "char-a", result)
+
+    result["publicLorebooks"][0].update(
+        {
+            "accessible": True,
+            "isCodePublic": True,
+            "worldInfo": {"entries": {"0": {"content": "Public fact."}}},
+        }
+    )
+    result["publicLorebooks"][1]["isCodePublic"] = False
+    update_lorebook_library(tmp_path, "char-a", result)
+
+    record = json.loads(
+        (tmp_path / "lorebooks" / "janitor" / "book-b.json").read_text()
+    )
+    assert record["recoveredObservations"][0]["attribution"] == {
+        "status": "inferred",
+        "candidates": ["book-b"],
     }
 
 
