@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Datacat Bulk JanitorAI Character Retriever
 // @namespace    https://greasyfork.org/users/1622561-flonz
-// @version      1.6.0
+// @version      1.7.0
 // @description  Collect character UUIDs from JanitorAI pages and bulk-retrieve them through Datacat with retries, persistence, and result export.
 // @author       Flo
 // @license      MIT
@@ -37,7 +37,7 @@
     pageWindow.__datacatJanitorToolsLoaded = true;
     pageWindow.__datacatBulkRetrieverLoaded = true;
 
-    const SCRIPT_VERSION = "1.6.0";
+    const SCRIPT_VERSION = "1.7.0";
     const UUID_PATTERN =
         /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     const JANITOR_COLLECTOR_STORAGE_KEY = "datacat_janitor_uuid_collector_v1";
@@ -236,10 +236,17 @@
 
     function mountJanitorCollector() {
         const collectedIds = new Set();
+        const discoveredCharacters = new Map();
         let scanIntervalId = null;
         let scanGeneration = 0;
         let lastScanAdded = 0;
+        let lastScanSkipped = 0;
+        let listRequestTemplate = null;
+        let scanningAllPages = false;
+        let stopAllPagesScan = false;
         let savedPosition = null;
+        let savedMinimised = false;
+        let savedFilters = {};
 
         try {
             const saved = JSON.parse(
@@ -255,6 +262,12 @@
                     const uuid = uuidFromValue(id);
                     if (uuid === id.toLowerCase()) collectedIds.add(uuid);
                 }
+                for (const character of Array.isArray(saved.characters)
+                    ? saved.characters
+                    : []) {
+                    const record = characterRecord(character);
+                    if (record) discoveredCharacters.set(record.id, record);
+                }
             }
             if (
                 Number.isFinite(saved.position?.left) &&
@@ -262,9 +275,17 @@
             ) {
                 savedPosition = saved.position;
             }
+            if (typeof saved.minimised === "boolean") {
+                savedMinimised = saved.minimised;
+            }
+            if (saved.filters && typeof saved.filters === "object") {
+                savedFilters = saved.filters;
+            }
         } catch {
             /* Ignore malformed saved collector state. */
         }
+
+        watchJanitorCharacterResponses();
 
         const panel = document.createElement("section");
         panel.id = "janitor-uuid-collector";
@@ -283,11 +304,41 @@
             </header>
             <div id="janitor-uuid-content">
                 <div id="janitor-uuid-status" role="status" aria-live="polite" data-tone="neutral">Scanning this page…</div>
-                <label class="janitor-field-label" for="janitor-uuid-output">Collected character IDs</label>
+                <details id="janitor-uuid-filters">
+                    <summary>Card filters</summary>
+                    <div class="janitor-filter-grid">
+                        <label>
+                            <span>Minimum tokens</span>
+                            <input id="janitor-min-tokens" type="number" min="0" step="1" inputmode="numeric"
+                                placeholder="No minimum">
+                        </label>
+                        <label>
+                            <span>Maximum tokens</span>
+                            <input id="janitor-max-tokens" type="number" min="0" step="1" inputmode="numeric"
+                                placeholder="No maximum">
+                        </label>
+                        <label class="janitor-filter-wide">
+                            <span>Require tags (all, comma-separated)</span>
+                            <input id="janitor-required-tags" type="text" spellcheck="false"
+                                placeholder="e.g. Male, OC">
+                        </label>
+                        <label class="janitor-filter-wide">
+                            <span>Exclude tags (any, comma-separated)</span>
+                            <input id="janitor-excluded-tags" type="text" spellcheck="false"
+                                placeholder="e.g. Multiple, Fandom">
+                        </label>
+                    </div>
+                    <small>Filters need character-list data. Cards with unknown token/tag data are skipped while a filter is active.</small>
+                </details>
+                <label class="janitor-field-label" for="janitor-uuid-output">
+                    Collected character IDs
+                    <span id="janitor-valid-card-count">(0 cards)</span>
+                </label>
                 <textarea id="janitor-uuid-output" readonly spellcheck="false"
                     placeholder="Character UUIDs found on this page will appear here."></textarea>
                 <div id="janitor-uuid-actions">
                     <button type="button" id="janitor-uuid-scan" class="janitor-secondary">Watch for cards</button>
+                    <button type="button" id="janitor-uuid-scan-all" class="janitor-secondary">Scan all pages</button>
                     <button type="button" id="janitor-uuid-send" class="janitor-primary" disabled>Send to Datacat</button>
                     <button type="button" id="janitor-uuid-copy" class="janitor-secondary" disabled>Copy IDs</button>
                     <button type="button" id="janitor-uuid-copy-links" class="janitor-secondary" disabled>Copy links</button>
@@ -335,7 +386,21 @@
             #janitor-uuid-status[data-tone="success"]::before { background: #62d58a; }
             #janitor-uuid-status[data-tone="warning"]::before { background: #edb85d; }
             #janitor-uuid-status[data-tone="error"]::before { background: #ef7373; }
+            #janitor-uuid-filters {
+                margin-bottom: 10px; padding: 8px 10px; border: 1px solid rgba(255,255,255,.07);
+                border-radius: 9px; background: rgba(255,255,255,.035);
+            }
+            #janitor-uuid-filters summary { cursor: pointer; color: #d8d8e2; font-size: 12px; font-weight: 700; }
+            .janitor-filter-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin-top: 9px; }
+            .janitor-filter-grid label { display: grid; gap: 4px; color: #aaaaba; font-size: 10px; font-weight: 650; }
+            .janitor-filter-grid .janitor-filter-wide { grid-column: 1 / -1; }
+            .janitor-filter-grid input {
+                width: 100%; min-width: 0; padding: 7px 8px; border: 1px solid #3c3c49; border-radius: 7px;
+                outline: none; background: rgba(7,7,11,.72); color: #f5f5f5; font: 12px/1.3 inherit;
+            }
+            #janitor-uuid-filters > small { display: block; margin-top: 7px; color: #858594; font-size: 10px; }
             .janitor-field-label { display: block; margin: 0 0 6px 2px; color: #aaaaba; font-size: 11px; font-weight: 650; }
+            #janitor-valid-card-count { color: #8f82ff; font-weight: 750; }
             #janitor-uuid-output {
                 display: block; width: 100%; height: 164px; resize: vertical;
                 padding: 10px 11px; border: 1px solid #3c3c49; border-radius: 10px;
@@ -351,7 +416,10 @@
             }
             #janitor-uuid-actions .janitor-primary { background: linear-gradient(135deg,#7c68ff,#6653ef); box-shadow: 0 5px 15px rgba(112,92,255,.2); }
             #janitor-uuid-actions .janitor-secondary { border-color: rgba(255,255,255,.08); background: rgba(255,255,255,.075); }
-            #janitor-uuid-actions .janitor-quiet { grid-column: 1 / -1; min-height: 32px; background: transparent; color: #a7a7b5; }
+            #janitor-uuid-actions .janitor-quiet {
+                grid-column: 1 / -1; min-height: 32px;
+                border-color: rgba(239,73,73,.48); background: rgba(190,35,35,.2); color: #ff8b8b;
+            }
             #janitor-uuid-actions button:not(:disabled):hover, #janitor-uuid-toggle:hover { filter: brightness(1.14); }
             #janitor-uuid-actions button:focus-visible, #janitor-uuid-toggle:focus-visible, #janitor-uuid-output:focus-visible { outline: 2px solid #9b8cff; outline-offset: 2px; }
             #janitor-uuid-actions button:disabled { cursor: not-allowed; opacity: .42; }
@@ -367,16 +435,28 @@
         `;
 
         const output = panel.querySelector("#janitor-uuid-output");
+        const validCardCount = panel.querySelector("#janitor-valid-card-count");
         const status = panel.querySelector("#janitor-uuid-status");
         const scanButton = panel.querySelector("#janitor-uuid-scan");
+        const scanAllButton = panel.querySelector("#janitor-uuid-scan-all");
         const copyButton = panel.querySelector("#janitor-uuid-copy");
         const copyLinksButton = panel.querySelector("#janitor-uuid-copy-links");
         const sendButton = panel.querySelector("#janitor-uuid-send");
         const clearButton = panel.querySelector("#janitor-uuid-clear");
         const toggleButton = panel.querySelector("#janitor-uuid-toggle");
+        const minTokensInput = panel.querySelector("#janitor-min-tokens");
+        const maxTokensInput = panel.querySelector("#janitor-max-tokens");
+        const requiredTagsInput = panel.querySelector("#janitor-required-tags");
+        const excludedTagsInput = panel.querySelector("#janitor-excluded-tags");
+
+        minTokensInput.value = savedFilters.minTokens ?? "";
+        maxTokensInput.value = savedFilters.maxTokens ?? "";
+        requiredTagsInput.value = savedFilters.requiredTags ?? "";
+        excludedTagsInput.value = savedFilters.excludedTags ?? "";
 
         const mount = () => {
             (document.head || document.documentElement).appendChild(style);
+            setPanelMinimised(panel, toggleButton, savedMinimised);
             document.body.appendChild(panel);
             if (savedPosition) {
                 panel.style.right = "auto";
@@ -385,7 +465,11 @@
                 panel.style.top = `${Math.max(0, savedPosition.top)}px`;
             }
             keepCollectorVisible();
-            refreshOutput();
+            if (discoveredCharacters.size > 0 && filtersAreActive()) {
+                reapplyFilters();
+            } else {
+                refreshOutput();
+            }
             syncFromPeers();
             publishJanitorIds(collectedIds);
             scanPage();
@@ -440,14 +524,375 @@
             }
         }
 
+        function characterListFromPayload(payload) {
+            const candidates = [
+                payload?.data,
+                payload?.characters,
+                payload?.results,
+                payload?.data?.data,
+                payload?.data?.characters,
+                payload?.data?.results
+            ];
+            return candidates.find(Array.isArray) || null;
+        }
+
+        function lastPageFromPayload(payload) {
+            const candidates = [
+                payload?.last_page,
+                payload?.lastPage,
+                payload?.total_pages,
+                payload?.totalPages,
+                payload?.meta?.last_page,
+                payload?.meta?.lastPage,
+                payload?.meta?.total_pages,
+                payload?.meta?.totalPages,
+                payload?.pagination?.last_page,
+                payload?.pagination?.lastPage,
+                payload?.pagination?.total_pages,
+                payload?.pagination?.totalPages,
+                payload?.data?.last_page,
+                payload?.data?.lastPage,
+                payload?.data?.meta?.last_page,
+                payload?.data?.meta?.lastPage
+            ];
+            const value = candidates
+                .map(Number)
+                .find((candidate) => Number.isInteger(candidate) && candidate > 0);
+            if (value) return value;
+
+            const total = Number(payload?.total ?? payload?.data?.total);
+            const size = Number(payload?.size ?? payload?.data?.size);
+            return Number.isFinite(total) &&
+                Number.isFinite(size) &&
+                total >= 0 &&
+                size > 0
+                ? Math.max(1, Math.ceil(total / size))
+                : null;
+        }
+
+        function isCharacterListUrl(value) {
+            try {
+                const url = new URL(value, location.href);
+                return (
+                    JANITOR_ORIGINS.has(url.origin) &&
+                    url.pathname.includes("/hampter/characters")
+                );
+            } catch {
+                return false;
+            }
+        }
+
+        function observeCharacterListPayload(url, payload, requestTemplate) {
+            const characters = characterListFromPayload(payload);
+            if (!characters || !isCharacterListUrl(url)) return;
+
+            listRequestTemplate = {
+                url: new URL(url, location.href).href,
+                headers: requestTemplate?.headers || {},
+                credentials: requestTemplate?.credentials || "include"
+            };
+            const changed = ingestCharacters(characters);
+            if (changed.added || changed.removed) {
+                persistCollectorState();
+                refreshOutput();
+            }
+        }
+
+        function watchJanitorCharacterResponses() {
+            const originalJanitorFetch = pageWindow.fetch;
+            pageWindow.fetch = async function (...args) {
+                const skipObserve = Boolean(
+                    args[1]?.__datacatSkipCharacterListObserve
+                );
+                if (skipObserve) {
+                    args[1] = { ...args[1] };
+                    delete args[1].__datacatSkipCharacterListObserve;
+                }
+                let requestTemplate = null;
+                try {
+                    const request =
+                        args[0] instanceof pageWindow.Request ? args[0] : null;
+                    const headers = new pageWindow.Headers(request?.headers);
+                    if (args[1]?.headers) {
+                        new pageWindow.Headers(args[1].headers).forEach(
+                            (value, name) => headers.set(name, value)
+                        );
+                    }
+                    requestTemplate = {
+                        headers: Object.fromEntries(headers.entries()),
+                        credentials:
+                            args[1]?.credentials ||
+                            request?.credentials ||
+                            "include"
+                    };
+                } catch {
+                    requestTemplate = {
+                        headers: {},
+                        credentials: "include"
+                    };
+                }
+
+                const response = await originalJanitorFetch.apply(this, args);
+                const requestUrl =
+                    response.url ||
+                    (typeof args[0] === "string" ? args[0] : args[0]?.url);
+                if (!skipObserve && isCharacterListUrl(requestUrl)) {
+                    response
+                        .clone()
+                        .json()
+                        .then((payload) =>
+                            observeCharacterListPayload(
+                                requestUrl,
+                                payload,
+                                requestTemplate
+                            )
+                        )
+                        .catch(() => {
+                            /* Non-JSON and failed list responses are ignored. */
+                        });
+                }
+                return response;
+            };
+
+            const originalOpen = pageWindow.XMLHttpRequest.prototype.open;
+            const originalSend = pageWindow.XMLHttpRequest.prototype.send;
+            const originalSetRequestHeader =
+                pageWindow.XMLHttpRequest.prototype.setRequestHeader;
+            pageWindow.XMLHttpRequest.prototype.open = function (
+                method,
+                url,
+                ...rest
+            ) {
+                this.__datacatCharacterListUrl =
+                    String(method).toUpperCase() === "GET" &&
+                    isCharacterListUrl(url)
+                        ? new URL(url, location.href).href
+                        : null;
+                this.__datacatCharacterListHeaders = {};
+                return originalOpen.call(this, method, url, ...rest);
+            };
+            pageWindow.XMLHttpRequest.prototype.setRequestHeader = function (
+                name,
+                value
+            ) {
+                if (this.__datacatCharacterListUrl) {
+                    this.__datacatCharacterListHeaders[
+                        String(name).toLowerCase()
+                    ] = String(value);
+                }
+                return originalSetRequestHeader.call(this, name, value);
+            };
+            pageWindow.XMLHttpRequest.prototype.send = function (...args) {
+                if (this.__datacatCharacterListUrl) {
+                    this.addEventListener(
+                        "load",
+                        () => {
+                            try {
+                                const payload =
+                                    this.responseType === "json"
+                                        ? this.response
+                                        : JSON.parse(this.responseText);
+                                observeCharacterListPayload(
+                                    this.responseURL ||
+                                        this.__datacatCharacterListUrl,
+                                    payload,
+                                    {
+                                        headers:
+                                            this.__datacatCharacterListHeaders,
+                                        credentials: "include"
+                                    }
+                                );
+                            } catch {
+                                /* Non-JSON and failed list responses are ignored. */
+                            }
+                        },
+                        { once: true }
+                    );
+                }
+                return originalSend.apply(this, args);
+            };
+        }
+
+        function normalizedTagSet(value) {
+            return new Set(
+                String(value || "")
+                    .split(",")
+                    .map((tag) => tag.trim().toLocaleLowerCase())
+                    .filter(Boolean)
+            );
+        }
+
+        function numericFilterValue(input) {
+            if (input.value.trim() === "") return null;
+            const value = Number(input.value);
+            return Number.isFinite(value) && value >= 0 ? value : null;
+        }
+
+        function currentFilters() {
+            return {
+                minTokens: numericFilterValue(minTokensInput),
+                maxTokens: numericFilterValue(maxTokensInput),
+                requiredTags: requiredTagsInput.value.trim(),
+                excludedTags: excludedTagsInput.value.trim()
+            };
+        }
+
+        function filtersAreActive(filters = currentFilters()) {
+            return (
+                filters.minTokens !== null ||
+                filters.maxTokens !== null ||
+                normalizedTagSet(filters.requiredTags).size > 0 ||
+                normalizedTagSet(filters.excludedTags).size > 0
+            );
+        }
+
+        function characterRecord(character) {
+            if (!character || typeof character !== "object") return null;
+            const id = uuidFromValue(
+                character.id ||
+                    character.uuid ||
+                    character.character_id ||
+                    character.characterId
+            );
+            if (!id) return null;
+
+            const tokenCandidates = [
+                character.token_count,
+                character.tokenCount,
+                character.tokens,
+                character.total_tokens,
+                character.totalTokens,
+                character.permanent_tokens,
+                character.permanentTokens
+            ];
+            const tokens = tokenCandidates
+                .filter(
+                    (value) =>
+                        value !== null &&
+                        value !== undefined &&
+                        String(value).trim() !== ""
+                )
+                .map(Number)
+                .find((value) => Number.isFinite(value) && value >= 0);
+            const tagValues = [
+                character.tags,
+                character.custom_tags,
+                character.customTags,
+                character.tag_names,
+                character.tagNames
+            ].flatMap((value) => (Array.isArray(value) ? value : []));
+            const tags = new Set(
+                tagValues
+                    .flatMap((tag) =>
+                        typeof tag === "string"
+                            ? [tag]
+                            : [
+                                  tag?.name,
+                                  tag?.slug,
+                                  tag?.tag_name,
+                                  tag?.title
+                              ]
+                    )
+                    .filter(Boolean)
+                    .map((tag) => String(tag).trim().toLocaleLowerCase())
+            );
+
+            return { id, tokens: tokens ?? null, tags };
+        }
+
+        function recordPassesFilters(record, filters = currentFilters()) {
+            if (!record) return !filtersAreActive(filters);
+            if (
+                filters.minTokens !== null &&
+                (record.tokens === null || record.tokens < filters.minTokens)
+            ) {
+                return false;
+            }
+            if (
+                filters.maxTokens !== null &&
+                (record.tokens === null || record.tokens > filters.maxTokens)
+            ) {
+                return false;
+            }
+
+            const requiredTags = normalizedTagSet(filters.requiredTags);
+            const excludedTags = normalizedTagSet(filters.excludedTags);
+            if (
+                requiredTags.size > 0 &&
+                (record.tags.size === 0 ||
+                    [...requiredTags].some((tag) => !record.tags.has(tag)))
+            ) {
+                return false;
+            }
+            if ([...excludedTags].some((tag) => record.tags.has(tag))) {
+                return false;
+            }
+            return true;
+        }
+
+        function ingestCharacters(characters) {
+            const filters = currentFilters();
+            let added = 0;
+            let removed = 0;
+            let skipped = 0;
+
+            for (const character of characters) {
+                const record = characterRecord(character);
+                if (!record) continue;
+                discoveredCharacters.set(record.id, record);
+                if (recordPassesFilters(record, filters)) {
+                    if (!collectedIds.has(record.id)) {
+                        collectedIds.add(record.id);
+                        added++;
+                    }
+                } else {
+                    skipped++;
+                    if (collectedIds.delete(record.id)) removed++;
+                }
+            }
+            lastScanAdded = added;
+            lastScanSkipped = skipped;
+            return { added, removed, skipped };
+        }
+
+        function reapplyFilters() {
+            const previousIds = new Set(collectedIds);
+            collectedIds.clear();
+            const result = ingestCharacters(
+                [...discoveredCharacters.values()].map((record) => ({
+                    id: record.id,
+                    token_count: record.tokens,
+                    tags: [...record.tags]
+                }))
+            );
+            result.added = [...collectedIds].filter(
+                (id) => !previousIds.has(id)
+            ).length;
+            result.removed = [...previousIds].filter(
+                (id) => !collectedIds.has(id)
+            ).length;
+            persistCollectorState();
+            refreshOutput();
+            return result;
+        }
+
         function refreshOutput() {
             output.value = [...collectedIds].join("\n");
             const count = collectedIds.size;
-            const prefix = scanIntervalId === null ? "Ready" : "Watching page";
+            validCardCount.textContent = `(${formatCount(count, "card")})`;
+            const prefix = scanningAllPages
+                ? "Scanning all pages"
+                : scanIntervalId === null
+                  ? "Ready"
+                  : "Watching page";
+            const skipped =
+                lastScanSkipped > 0 ? ` · ${lastScanSkipped} filtered` : "";
             setStatus(
                 status,
-                `${prefix} · ${formatCount(count, "ID")} · +${lastScanAdded} last scan`,
-                scanIntervalId === null ? "neutral" : "success"
+                `${prefix} · ${formatCount(count, "ID")} · +${lastScanAdded} last scan${skipped}`,
+                scanIntervalId === null && !scanningAllPages
+                    ? "neutral"
+                    : "success"
             );
             copyButton.disabled = count === 0;
             copyLinksButton.disabled = count === 0;
@@ -461,7 +906,16 @@
                 JANITOR_COLLECTOR_STORAGE_KEY,
                 JSON.stringify({
                     ids: [...collectedIds],
+                    characters: [...discoveredCharacters.values()].map(
+                        (record) => ({
+                            id: record.id,
+                            total_tokens: record.tokens,
+                            tags: [...record.tags]
+                        })
+                    ),
                     position: savedPosition,
+                    minimised: panel.classList.contains("minimised"),
+                    filters: currentFilters(),
                     updatedAt: Date.now()
                 })
             );
@@ -472,6 +926,11 @@
         // fresh tab must pull peers that have nothing new to trigger a republish)
         // and on every peer publish.
         function syncFromPeers() {
+            // A peer only publishes UUIDs, not the token/tag metadata needed to
+            // validate it. Do not let an unfiltered peer repopulate a filtered
+            // collection after the user has just rebuilt it.
+            if (filtersAreActive()) return false;
+
             let changed = false;
             for (const id of activeJanitorIds()) {
                 if (!collectedIds.has(id)) {
@@ -503,9 +962,12 @@
                 scanIntervalId = null;
                 scanButton.textContent = "Watch for cards";
             }
+            if (scanningAllPages) stopAllPagesScan = true;
             scanGeneration++;
             collectedIds.clear();
+            discoveredCharacters.clear();
             lastScanAdded = 0;
+            lastScanSkipped = 0;
             persistCollectorState();
             refreshOutput();
         }
@@ -516,26 +978,34 @@
 
         function scanPage({ refreshWhenUnchanged = false } = {}) {
             const before = collectedIds.size;
+            const canCollectUnknownCards = !filtersAreActive();
 
             // Janitor uses both relative and absolute links depending on the
             // page/view. Let uuidFromCharacterLink validate the origin and
             // path instead of relying on a particular href representation.
-            for (const link of document.querySelectorAll("a[href]")) {
-                const id = uuidFromCharacterLink(link.getAttribute("href"));
-                if (id) collectedIds.add(id);
-            }
+            if (canCollectUnknownCards) {
+                for (const link of document.querySelectorAll("a[href]")) {
+                    const id = uuidFromCharacterLink(link.getAttribute("href"));
+                    if (id) collectedIds.add(id);
+                }
 
-            for (const card of document.querySelectorAll(
-                "[data-character-id], [data-character-uuid]"
-            )) {
-                const id =
-                    uuidFromValue(card.getAttribute("data-character-id")) ||
-                    uuidFromValue(card.getAttribute("data-character-uuid"));
-                if (id) collectedIds.add(id);
+                for (const card of document.querySelectorAll(
+                    "[data-character-id], [data-character-uuid]"
+                )) {
+                    const id =
+                        uuidFromValue(card.getAttribute("data-character-id")) ||
+                        uuidFromValue(card.getAttribute("data-character-uuid"));
+                    if (id) collectedIds.add(id);
+                }
             }
 
             const added = collectedIds.size - before;
             lastScanAdded = added;
+            lastScanSkipped = canCollectUnknownCards
+                ? 0
+                : document.querySelectorAll(
+                      "a[href*='/characters/'], [data-character-id], [data-character-uuid]"
+                  ).length;
             if (added) {
                 persistCollectorState();
                 refreshOutput();
@@ -543,6 +1013,116 @@
                 refreshOutput();
             }
             return added;
+        }
+
+        async function scanAllPages() {
+            if (scanningAllPages) {
+                stopAllPagesScan = true;
+                scanAllButton.disabled = true;
+                scanAllButton.textContent = "Stopping…";
+                return;
+            }
+            if (!listRequestTemplate) {
+                setStatus(
+                    status,
+                    "No character-list response captured yet. Wait for this page's cards to load, then try again.",
+                    "warning"
+                );
+                return;
+            }
+
+            scanningAllPages = true;
+            stopAllPagesScan = false;
+            scanAllButton.textContent = "Stop all-pages scan";
+            scanButton.disabled = true;
+            let pagesScanned = 0;
+            let knownLastPage = null;
+            const idsBeforeScan = new Set(collectedIds);
+            const scannedIds = new Set();
+            const maximumPages = 250;
+
+            try {
+                const requestUrl = new URL(listRequestTemplate.url);
+                for (let page = 1; page <= (knownLastPage || maximumPages); page++) {
+                    if (stopAllPagesScan) break;
+                    requestUrl.searchParams.set("page", String(page));
+                    setStatus(
+                        status,
+                        `Scanning page ${page}${knownLastPage ? ` of ${knownLastPage}` : ""}… · ${formatCount(collectedIds.size, "ID")}`,
+                        "success"
+                    );
+
+                    const response = await pageWindow.fetch(requestUrl.href, {
+                        credentials: listRequestTemplate.credentials,
+                        headers: {
+                            ...listRequestTemplate.headers,
+                            Accept: "application/json"
+                        },
+                        __datacatSkipCharacterListObserve: true
+                    });
+                    if (!response.ok) {
+                        throw new Error(
+                            `page ${page} returned HTTP ${response.status}`
+                        );
+                    }
+                    const payload = await response.json();
+                    if (stopAllPagesScan) break;
+                    const characters = characterListFromPayload(payload);
+                    if (!characters) {
+                        throw new Error(
+                            `page ${page} did not contain a character list`
+                        );
+                    }
+                    knownLastPage =
+                        lastPageFromPayload(payload) || knownLastPage;
+                    if (characters.length === 0) break;
+
+                    for (const character of characters) {
+                        const record = characterRecord(character);
+                        if (record) scannedIds.add(record.id);
+                    }
+                    ingestCharacters(characters);
+                    pagesScanned++;
+                    persistCollectorState();
+                    output.value = [...collectedIds].join("\n");
+                    validCardCount.textContent = `(${formatCount(collectedIds.size, "card")})`;
+                    if (knownLastPage && page >= knownLastPage) break;
+                }
+
+                const stopped = stopAllPagesScan;
+                const totalAdded = [...collectedIds].filter(
+                    (id) => !idsBeforeScan.has(id)
+                ).length;
+                const totalFiltered = [...scannedIds].filter((id) => {
+                    const record = discoveredCharacters.get(id);
+                    return record && !recordPassesFilters(record);
+                }).length;
+                setStatus(
+                    status,
+                    `${stopped ? "Stopped" : "Finished"} · ${formatCount(pagesScanned, "page")} · ${formatCount(scannedIds.size, "unique card")} scanned · +${totalAdded} collected · ${totalFiltered} filtered · ${formatCount(collectedIds.size, "ID")} total`,
+                    stopped ? "warning" : "success"
+                );
+            } catch (error) {
+                setStatus(
+                    status,
+                    `All-pages scan failed: ${error instanceof Error ? error.message : String(error)}`,
+                    "error"
+                );
+            } finally {
+                scanningAllPages = false;
+                stopAllPagesScan = false;
+                scanAllButton.disabled = false;
+                scanAllButton.textContent = "Scan all pages";
+                scanButton.disabled = false;
+                persistCollectorState();
+                output.value = [...collectedIds].join("\n");
+                const count = collectedIds.size;
+                validCardCount.textContent = `(${formatCount(count, "card")})`;
+                copyButton.disabled = count === 0;
+                copyLinksButton.disabled = count === 0;
+                sendButton.disabled = count === 0;
+                clearButton.disabled = count === 0;
+            }
         }
 
         async function copyIds() {
@@ -624,6 +1204,38 @@
         }
 
         scanButton.addEventListener("click", toggleScanning);
+        scanAllButton.addEventListener("click", () => {
+            scanAllPages();
+        });
+        for (const input of [
+            minTokensInput,
+            maxTokensInput,
+            requiredTagsInput,
+            excludedTagsInput
+        ]) {
+            input.addEventListener("change", () => {
+                const filters = currentFilters();
+                if (
+                    filters.minTokens !== null &&
+                    filters.maxTokens !== null &&
+                    filters.minTokens > filters.maxTokens
+                ) {
+                    setStatus(
+                        status,
+                        "Minimum tokens cannot be greater than maximum tokens.",
+                        "warning"
+                    );
+                    return;
+                }
+                const result = reapplyFilters();
+                scanPage();
+                setStatus(
+                    status,
+                    `Filters applied · +${result.added} included · ${result.removed} removed · ${result.skipped} filtered`,
+                    "success"
+                );
+            });
+        }
         copyButton.addEventListener("click", () => {
             copyIds().catch((error) => {
                 setStatus(status, `Could not copy UUIDs: ${String(error)}`, "error");
@@ -641,6 +1253,7 @@
         toggleButton.addEventListener("click", () => {
             const minimised = !panel.classList.contains("minimised");
             setPanelMinimised(panel, toggleButton, minimised);
+            persistCollectorState();
         });
     }
 
@@ -2004,6 +2617,7 @@
         const shouldCheckExisting =
             options.skipExisting && !options.alwaysReextract;
         const existingStatuses = new Map();
+        const existenceChecks = new Map();
         const completedIds = new Set(state.results.map((result) => result.id));
         const startedIds = new Set();
         let nextExistenceCheckIndex = 0;
@@ -2087,6 +2701,7 @@
                         activeExistenceChecks--;
                         fillExistenceCheckQueue();
                     });
+                existenceChecks.set(id, check);
             }
         };
 
@@ -2131,6 +2746,12 @@
 
                 try {
                     if (shouldCheckExisting) {
+                        // Keep the preflight check ahead of retrieval for this
+                        // ID. If they overlap, Datacat can accept a retrieval
+                        // whose response later times out, then the preflight
+                        // sees that new record and incorrectly caches the
+                        // failed item as already existing.
+                        await existenceChecks.get(id);
                         const existenceStatus = existingStatuses.get(id);
 
                         if (existenceStatus === "deleted") {
